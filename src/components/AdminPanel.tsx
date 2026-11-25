@@ -408,25 +408,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const handleDeleteRegisteredUser = async (userId: string) => {
-    if (onDeleteUser) {
-      await onDeleteUser(userId);
-      soundManager.playToom(1);
-      showNotice(language === 'ur' ? 'یوزر ریکارڈ ڈیلیٹ ہو گیا!' : 'User removed');
-      return;
-    }
     try {
       const updated = registeredUsers.filter((u) => u.id !== userId);
       setLocalRegisteredUsers(updated);
-      localStorage.setItem('muna_registered_users', JSON.stringify(updated));
+      const rawUsers = localStorage.getItem('muna_registered_users');
+      const parsedUsers: RegisteredUser[] = rawUsers ? JSON.parse(rawUsers) : [];
+      localStorage.setItem(
+        'muna_registered_users',
+        JSON.stringify(parsedUsers.filter((u) => u.id !== userId))
+      );
       const nextBals = { ...userBalancesMap };
       delete nextBals[userId];
       setUserBalancesMap(nextBals);
       localStorage.setItem('muna_user_balances', JSON.stringify(nextBals));
-      soundManager.playToom(1);
-      showNotice(language === 'ur' ? 'یوزر ریکارڈ ڈیلیٹ ہو گیا!' : 'User removed');
     } catch {
       // ignore
     }
+    if (onDeleteUser) {
+      await onDeleteUser(userId);
+    }
+    soundManager.playToom(1);
+    showNotice(language === 'ur' ? 'یوزر ریکارڈ ڈیلیٹ ہو گیا!' : 'User removed');
   };
 
   const nowTs = Date.now();

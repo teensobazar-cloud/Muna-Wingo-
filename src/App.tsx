@@ -285,6 +285,29 @@ export default function App() {
   const playerSyncSeqRef = useRef<number>(0);
   const betInFlightRef = useRef<number>(0);
   const adminLocalSyncedRef = useRef<boolean>(false);
+  const deletedUserIdsRef = useRef<Set<string>>(
+    (() => {
+      try {
+        const raw = localStorage.getItem('muna_deleted_user_ids');
+        return new Set<string>(raw ? (JSON.parse(raw) as string[]) : []);
+      } catch {
+        return new Set<string>();
+      }
+    })()
+  );
+  const deletedPhonesRef = useRef<Set<string>>(
+    (() => {
+      try {
+        const raw = localStorage.getItem('muna_deleted_phones');
+        return new Set<string>(raw ? (JSON.parse(raw) as string[]) : []);
+      } catch {
+        return new Set<string>();
+      }
+    })()
+  );
+  const serverAdminUsersRef = useRef<RegisteredUser[]>([]);
+  const firestoreAdminUsersRef = useRef<RegisteredUser[]>([]);
+  const prevFirestoreIdsRef = useRef<Set<string>>(new Set());
 
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [firebaseAuthReady, setFirebaseAuthReady] = useState<boolean>(false);
@@ -356,9 +379,96 @@ export default function App() {
     }
   };
 
+  const normalizePhoneKey = (raw?: string) => String(raw || '').replace(/\s|-/g, '').trim();
+
+  const persistDeletedTombstones = () => {
+    try {
+      localStorage.setItem(
+        'muna_deleted_user_ids',
+        JSON.stringify(Array.from(deletedUserIdsRef.current))
+      );
+      localStorage.setItem(
+        'muna_deleted_phones',
+        JSON.stringify(Array.from(deletedPhonesRef.current))
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const isUserDeletedLocally = (u: { id?: string; phone?: string }) => {
+    if (u.id && deletedUserIdsRef.current.has(u.id)) return true;
+    const cp = normalizePhoneKey(u.phone);
+    if (cp && deletedPhonesRef.current.has(cp)) return true;
+    return false;
+  };
+
+  const purgeUsersFromLocalStorage = (idsToRemove: Set<string>, phonesToRemove?: Set<string>) => {
+    try {
+      const rawUsers = localStorage.getItem('muna_registered_users');
+      if (rawUsers) {
+        const parsed = JSON.parse(rawUsers) as RegisteredUser[];
+        const filtered = parsed.filter(
+          (u) =>
+            !idsToRemove.has(u.id) &&
+            !(phonesToRemove && phonesToRemove.has(normalizePhoneKey(u.phone)))
+        );
+        localStorage.setItem('muna_registered_users', JSON.stringify(filtered));
+      }
+      const rawBals = localStorage.getItem('muna_user_balances');
+      if (rawBals) {
+        const balMap = JSON.parse(rawBals) as Record<string, number>;
+        idsToRemove.forEach((id) => delete balMap[id]);
+        localStorage.setItem('muna_user_balances', JSON.stringify(balMap));
+      }
+      const rawRefs = localStorage.getItem('muna_referral_earnings');
+      if (rawRefs) {
+        const refMap = JSON.parse(rawRefs) as Record<string, number>;
+        idsToRemove.forEach((id) => delete refMap[id]);
+        localStorage.setItem('muna_referral_earnings', JSON.stringify(refMap));
+      }
+    } catch {
+      // ignore
+    }
+
+    const active = currentUserRef.current;
+    if (
+      active &&
+      (idsToRemove.has(active.id) ||
+        (phonesToRemove && phonesToRemove.has(normalizePhoneKey(active.phone))))
+    ) {
+      void signOutFirebase();
+      currentUserRef.current = null;
+      isUserSignedInRef.current = false;
+      setCurrentUser(null);
+    }
+  };
+
+  const recomputeMergedAdminUsers = (): RegisteredUser[] => {
+    const merged = new Map<string, RegisteredUser>();
+    for (const fu of firestoreAdminUsersRef.current) {
+      if (!isUserDeletedLocally(fu)) {
+        merged.set(fu.id, fu);
+      }
+    }
+    for (const su of serverAdminUsersRef.current) {
+      if (!isUserDeletedLocally(su)) {
+        const prev = merged.get(su.id);
+        merged.set(su.id, prev ? { ...prev, ...su } : su);
+      }
+    }
+    const sorted = Array.from(merged.values()).sort(
+      (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+    );
+    setAdminUsers(sorted);
+    return sorted;
+  };
+
   const applyAdminSnapshot = (data: {
     serverTime?: number;
     users?: RegisteredUser[];
+    deletedUserIds?: string[];
+    deletedPhones?: string[];
     transactions?: PaymentTransaction[];
     bets?: UserBet[];
     summary?: AdminSummary;
@@ -367,7 +477,35 @@ export default function App() {
     historyByMode?: Record<GameTimeOption, DrawResult[]>;
   }) => {
     if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
-    if (Array.isArray(data.users)) setAdminUsers(data.users);
+    let tombstonesChanged = false;
+    if (Array.isArray(data.deletedUserIds)) {
+      for (const id of data.deletedUserIds) {
+        if (id && !deletedUserIdsRef.current.has(id)) {
+          deletedUserIdsRef.current.add(id);
+          tombstonesChanged = true;
+        }
+      }
+    }
+    if (Array.isArray(data.deletedPhones)) {
+      for (const ph of data.deletedPhones) {
+        const cp = normalizePhoneKey(ph);
+        if (cp && !deletedPhonesRef.current.has(cp)) {
+          deletedPhonesRef.current.add(cp);
+          tombstonesChanged = true;
+        }
+      }
+    }
+    if (tombstonesChanged) {
+      persistDeletedTombstones();
+      purgeUsersFromLocalStorage(deletedUserIdsRef.current, deletedPhonesRef.current);
+      firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter(
+        (u) => !isUserDeletedLocally(u)
+      );
+    }
+    if (Array.isArray(data.users)) {
+      serverAdminUsersRef.current = data.users.filter((u) => !isUserDeletedLocally(u));
+      recomputeMergedAdminUsers();
+    }
     if (Array.isArray(data.transactions)) setAdminTransactions(data.transactions);
     if (Array.isArray(data.bets)) setAdminBets(data.bets);
     if (data.summary) setAdminSummary(data.summary);
@@ -384,11 +522,14 @@ export default function App() {
       const rawUsers = localStorage.getItem('muna_registered_users');
       const rawTxs = localStorage.getItem('aloye_wingo_transactions');
       const rawBals = localStorage.getItem('muna_user_balances');
-      const localUsers = rawUsers ? JSON.parse(rawUsers) : [];
+      const parsedLocalUsers: RegisteredUser[] = rawUsers ? JSON.parse(rawUsers) : [];
+      const localUsers = Array.isArray(parsedLocalUsers)
+        ? parsedLocalUsers.filter((u) => u && !isUserDeletedLocally(u))
+        : [];
       const localTxs = rawTxs ? JSON.parse(rawTxs) : [];
       const balancesMap = rawBals ? JSON.parse(rawBals) : {};
       if (
-        (Array.isArray(localUsers) && localUsers.length > 0) ||
+        localUsers.length > 0 ||
         (Array.isArray(localTxs) && localTxs.length > 0)
       ) {
         const res = await fetch('/api/admin/sync-local', {
@@ -443,6 +584,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
+        return data;
       } else if (res.status === 401) {
         isAdminAuthRef.current = false;
         setIsAdminAuthenticated(false);
@@ -451,6 +593,7 @@ export default function App() {
     } catch {
       // ignore network glitches
     }
+    return null;
   };
 
   const syncPlayerState = async (userId?: string) => {
@@ -467,6 +610,14 @@ export default function App() {
       if (data.historyByMode) {
         historyByModeRef.current = data.historyByMode;
         setHistoryByMode(data.historyByMode);
+      }
+
+      // If this user was deleted by admin, immediately end their active session
+      if (uid && data.deleted) {
+        deletedUserIdsRef.current.add(uid);
+        persistDeletedTombstones();
+        purgeUsersFromLocalStorage(new Set([uid]));
+        return;
       }
 
       // Never overwrite optimistic bet deduction or fresh mutation with stale GET response
@@ -553,7 +704,18 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user: initialUser, localBalance: balanceRef.current }),
       })
-        .then((r) => (r.ok ? r.json() : null))
+        .then(async (r) => {
+          const body = await r.json().catch(() => null);
+          if (r.status === 410 || body?.deleted) {
+            deletedUserIdsRef.current.add(initialUser.id);
+            const cp = normalizePhoneKey(initialUser.phone);
+            if (cp) deletedPhonesRef.current.add(cp);
+            persistDeletedTombstones();
+            purgeUsersFromLocalStorage(new Set([initialUser.id]), cp ? new Set([cp]) : undefined);
+            return null;
+          }
+          return r.ok ? body : null;
+        })
         .then((data) => {
           if (!data) return;
           if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
@@ -817,6 +979,12 @@ export default function App() {
             });
           }
         },
+        onUserDeleted: () => {
+          const uid = firebaseUser.uid;
+          deletedUserIdsRef.current.add(uid);
+          persistDeletedTombstones();
+          purgeUsersFromLocalStorage(new Set([uid]));
+        },
       },
       (err) => {
         console.error('Player Firestore sync error:', err);
@@ -835,17 +1003,38 @@ export default function App() {
     const unsub = subscribeAdminFirestoreState(
       {
         onUsersUpdate: (cloudUsers) => {
-          if (cloudUsers.length > 0) {
-            setAdminUsers((prev) => {
-              const merged = new Map<string, RegisteredUser>();
-              for (const u of prev) merged.set(u.id, u);
-              for (const cu of cloudUsers) {
-                const ex = merged.get(cu.id);
-                merged.set(cu.id, ex ? { ...cu, ...ex, balance: cu.balance ?? ex.balance } : cu);
-              }
-              return Array.from(merged.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-            });
+          const cloudIds = new Set<string>();
+          const activeCloudUsers: RegisteredUser[] = [];
+          for (const cu of cloudUsers) {
+            if (isUserDeletedLocally(cu)) {
+              void adminDeleteUserInFirestore(cu.id).catch(() => {});
+              continue;
+            }
+            cloudIds.add(cu.id);
+            activeCloudUsers.push(cu);
           }
+
+          // Any user that previously existed in Firestore and disappeared was deleted in Cloud DB
+          if (prevFirestoreIdsRef.current.size > 0) {
+            const removedIds = new Set<string>();
+            for (const prevId of prevFirestoreIdsRef.current) {
+              if (!cloudIds.has(prevId)) {
+                removedIds.add(prevId);
+                deletedUserIdsRef.current.add(prevId);
+              }
+            }
+            if (removedIds.size > 0) {
+              persistDeletedTombstones();
+              serverAdminUsersRef.current = serverAdminUsersRef.current.filter(
+                (u) => !removedIds.has(u.id)
+              );
+              purgeUsersFromLocalStorage(removedIds);
+            }
+          }
+
+          prevFirestoreIdsRef.current = cloudIds;
+          firestoreAdminUsersRef.current = activeCloudUsers;
+          recomputeMergedAdminUsers();
         },
         onTransactionsUpdate: (cloudTxs) => {
           if (cloudTxs.length > 0) {
@@ -1264,6 +1453,12 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user: currentUser, localBalance: preBetBalance }),
           });
+          if (syncRes.status === 410) {
+            deletedUserIdsRef.current.add(currentUser.id);
+            persistDeletedTombstones();
+            purgeUsersFromLocalStorage(new Set([currentUser.id]));
+            return;
+          }
           if (syncRes.ok) {
             res = await postBet();
           }
@@ -1378,12 +1573,20 @@ export default function App() {
 
         let res = await submitDeposit();
         if (res.status === 404) {
-          await fetch('/api/auth/sync-session', {
+          const syncRes = await fetch('/api/auth/sync-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user: currentUser, localBalance: balanceRef.current }),
           });
-          res = await submitDeposit();
+          if (syncRes.status === 410) {
+            deletedUserIdsRef.current.add(currentUser.id);
+            persistDeletedTombstones();
+            purgeUsersFromLocalStorage(new Set([currentUser.id]));
+            return;
+          }
+          if (syncRes.ok) {
+            res = await submitDeposit();
+          }
         }
 
         if (res.ok) {
@@ -1539,12 +1742,20 @@ export default function App() {
 
         let res = await submitWithdraw();
         if (res.status === 404) {
-          await fetch('/api/auth/sync-session', {
+          const syncRes = await fetch('/api/auth/sync-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user: currentUser, localBalance: preWithdrawBalance }),
           });
-          res = await submitWithdraw();
+          if (syncRes.status === 410) {
+            deletedUserIdsRef.current.add(currentUser.id);
+            persistDeletedTombstones();
+            purgeUsersFromLocalStorage(new Set([currentUser.id]));
+            return;
+          }
+          if (syncRes.ok) {
+            res = await submitWithdraw();
+          }
         }
 
         if (res.ok) {
@@ -1885,6 +2096,22 @@ export default function App() {
   };
 
   const handleDeleteUserOnServer = async (userId: string) => {
+    const matched =
+      serverAdminUsersRef.current.find((u) => u.id === userId) ||
+      firestoreAdminUsersRef.current.find((u) => u.id === userId) ||
+      adminUsers.find((u) => u.id === userId);
+    const phoneKey = matched?.phone ? normalizePhoneKey(matched.phone) : '';
+
+    deletedUserIdsRef.current.add(userId);
+    if (phoneKey) deletedPhonesRef.current.add(phoneKey);
+    persistDeletedTombstones();
+
+    prevFirestoreIdsRef.current.delete(userId);
+    serverAdminUsersRef.current = serverAdminUsersRef.current.filter((u) => u.id !== userId);
+    firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter((u) => u.id !== userId);
+    recomputeMergedAdminUsers();
+    purgeUsersFromLocalStorage(new Set([userId]), phoneKey ? new Set([phoneKey]) : undefined);
+
     try {
       const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
         method: 'DELETE',
@@ -1892,12 +2119,13 @@ export default function App() {
       });
       if (res.ok) {
         applyAdminSnapshot(await res.json());
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminDeleteUserInFirestore(userId).catch(() => {});
-        }
       }
     } catch {
       // ignore
+    }
+
+    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
+      await adminDeleteUserInFirestore(userId).catch(() => {});
     }
   };
 
@@ -1945,6 +2173,19 @@ export default function App() {
 
   // Admin CRUD: Delete All User Data
   const handleClearAllUserData = async () => {
+    for (const u of [...serverAdminUsersRef.current, ...firestoreAdminUsersRef.current, ...adminUsers]) {
+      deletedUserIdsRef.current.add(u.id);
+      const cp = normalizePhoneKey(u.phone);
+      if (cp) deletedPhonesRef.current.add(cp);
+    }
+    persistDeletedTombstones();
+    serverAdminUsersRef.current = [];
+    firestoreAdminUsersRef.current = [];
+    prevFirestoreIdsRef.current = new Set();
+    setAdminUsers([]);
+    setAdminTransactions([]);
+    setAdminBets([]);
+
     try {
       const res = await fetch('/api/admin/reset-all', {
         method: 'POST',
@@ -1954,6 +2195,13 @@ export default function App() {
       if (res.ok) applyAdminSnapshot(await res.json());
     } catch {
       // ignore
+    }
+    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
+      await pushAdminSnapshotToFirestore(
+        [],
+        [],
+        Array.from(deletedUserIdsRef.current)
+      ).catch(() => {});
     }
     setBalance(0);
     setUserBets([]);
@@ -2092,6 +2340,10 @@ export default function App() {
               setBalance(10);
             }
 
+            deletedUserIdsRef.current.delete(user.id);
+            const cp = normalizePhoneKey(user.phone);
+            if (cp) deletedPhonesRef.current.delete(cp);
+            persistDeletedTombstones();
             setCurrentUser(user);
             if (serverPayload?.isGoogleAdmin) {
               isAdminAuthRef.current = true;
@@ -2422,10 +2674,17 @@ export default function App() {
         adminSummary={adminSummary}
         lastSyncedAt={lastAdminSyncedAt}
         onRefreshAdmin={async () => {
-          adminLocalSyncedRef.current = false;
-          await fetchAdminState();
+          const fresh = await fetchAdminState();
           if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-            await pushAdminSnapshotToFirestore(adminUsers, adminTransactions).catch(() => {});
+            const usersToPush = (fresh?.users || serverAdminUsersRef.current).filter(
+              (u: RegisteredUser) => !isUserDeletedLocally(u)
+            );
+            const txsToPush = fresh?.transactions || adminTransactions;
+            await pushAdminSnapshotToFirestore(
+              usersToPush,
+              txsToPush,
+              Array.from(deletedUserIdsRef.current)
+            ).catch(() => {});
           }
         }}
         onUpdateUserBalance={handleUpdateUserBalanceOnServer}
@@ -2437,7 +2696,6 @@ export default function App() {
           if (snapshot) {
             applyAdminSnapshot(snapshot);
           }
-          adminLocalSyncedRef.current = false;
           fetchAdminState(pin);
         }}
         transactions={isAdminAuthenticated ? adminTransactions : transactions}
@@ -2499,7 +2757,15 @@ export default function App() {
               return false;
             }
             await ensureAdminDocument(fbUser);
-            await pushAdminSnapshotToFirestore(adminUsers, adminTransactions);
+            const fresh = await fetchAdminState();
+            const usersToPush = (fresh?.users || serverAdminUsersRef.current).filter(
+              (u: RegisteredUser) => !isUserDeletedLocally(u)
+            );
+            await pushAdminSnapshotToFirestore(
+              usersToPush,
+              fresh?.transactions || adminTransactions,
+              Array.from(deletedUserIdsRef.current)
+            );
             showToast('Firebase Cloud DB connected live!');
             return true;
           } catch {

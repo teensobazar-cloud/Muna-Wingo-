@@ -250,6 +250,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           return;
         }
 
+        if (res.status === 404 && data?.deleted) {
+          saveStoredUsers(users.filter((u) => normalizePhone(u.phone) !== cleanPhone));
+          setIsSubmitting(false);
+          setError(
+            language === 'ur'
+              ? 'یہ اکاؤنٹ ایڈمن نے ڈیلیٹ کر دیا ہے۔ براہ کرم نیا اکاؤنٹ بنائیں (Sign Up)'
+              : 'This account was deleted. Please Create New Account.'
+          );
+          return;
+        }
+
         // If 404 on server, check if user existed previously in localStorage and sync up
         const localMatched = users.find(
           (u) => normalizePhone(u.phone) === cleanPhone && u.password === password
@@ -268,7 +279,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user: localMatched, localBalance: localBal }),
           });
-          const syncData = await syncRes.json();
+          const syncData = await syncRes.json().catch(() => null);
+          if (syncRes.status === 410 || syncData?.deleted) {
+            saveStoredUsers(users.filter((u) => u.id !== localMatched.id));
+            setIsSubmitting(false);
+            setError(
+              language === 'ur'
+                ? 'یہ اکاؤنٹ ایڈمن نے ڈیلیٹ کر دیا ہے۔ براہ کرم نیا اکاؤنٹ بنائیں (Sign Up)'
+                : 'This account was deleted. Please Create New Account.'
+            );
+            return;
+          }
           if (syncRes.ok && syncData?.user) {
             soundManager.playCash();
             setIsSubmitting(false);
@@ -320,6 +341,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           body: JSON.stringify({
             user: ensured.user,
             localBalance: ensured.balance,
+            isGoogleLogin: true,
           }),
         });
         if (res.ok) {

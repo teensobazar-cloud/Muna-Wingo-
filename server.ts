@@ -83,6 +83,8 @@ interface DatabaseSchema {
   historyByMode: Record<GameTimeOption, DrawResult[]>;
   forcedOutcomes: Record<GameTimeOption, ForcedOutcomeSpec | null>;
   forcedNumbers?: Record<GameTimeOption, { number: number; targetPeriod?: string; setAt?: number } | null>;
+  deletedUserIds?: string[];
+  deletedPhones?: string[];
   adminPin: string;
 }
 
@@ -401,6 +403,8 @@ function loadDatabase(): DatabaseSchema {
       180: null,
       300: null,
     },
+    deletedUserIds: [],
+    deletedPhones: [],
     adminPin: '786',
   };
 
@@ -440,6 +444,8 @@ function loadDatabase(): DatabaseSchema {
       bets: Array.isArray(parsed.bets) ? parsed.bets : [],
       historyByMode: parsed.historyByMode || empty.historyByMode,
       forcedOutcomes: migratedForced,
+      deletedUserIds: Array.isArray(parsed.deletedUserIds) ? parsed.deletedUserIds : [],
+      deletedPhones: Array.isArray(parsed.deletedPhones) ? parsed.deletedPhones : [],
       adminPin: typeof parsed.adminPin === 'string' && parsed.adminPin.length >= 3 ? parsed.adminPin : '786',
     };
 
@@ -847,6 +853,8 @@ function buildAdminSnapshot() {
   return {
     serverTime: now,
     users: usersList,
+    deletedUserIds: db.deletedUserIds || [],
+    deletedPhones: db.deletedPhones || [],
     transactions: sortedTransactions,
     bets: db.bets.slice(0, 250),
     forcedNumbers: getSimpleForcedMap(),
@@ -948,6 +956,9 @@ export function createApiApp() {
     };
 
     db.users[id] = user;
+    if (Array.isArray(db.deletedPhones)) {
+      db.deletedPhones = db.deletedPhones.filter((p) => p !== cleanPhone);
+    }
     saveDatabase();
     broadcastEvent('state_changed', { reason: 'user_signup', userId: id });
 
@@ -972,7 +983,8 @@ export function createApiApp() {
     );
 
     if (!found) {
-      return res.status(404).json({ error: 'NO_ACCOUNT' });
+      const wasDeleted = Boolean(db.deletedPhones?.includes(cleanPhone));
+      return res.status(404).json({ error: 'NO_ACCOUNT', deleted: wasDeleted });
     }
     if (found.password !== String(password || '')) {
       return res.status(401).json({ error: 'WRONG_PASSWORD' });
@@ -994,18 +1006,31 @@ export function createApiApp() {
     });
   });
 
-  // Ensure a previously local-only user exists on server after upgrade
+  // Ensure a previously local-only user exists on server after upgrade (never resurrect deleted users)
   app.post('/api/auth/sync-session', (req: Request, res: Response) => {
-    const { user, localBalance } = req.body || {};
+    const { user, localBalance, isGoogleLogin } = req.body || {};
     if (!user || !user.id || !user.phone) {
       return res.status(400).json({ error: 'Invalid session payload' });
     }
     const cleanPhone = normalizePhone(user.phone);
+    const isDeletedById = Boolean(db.deletedUserIds?.includes(String(user.id)));
+    const isDeletedByPhone = Boolean(cleanPhone && db.deletedPhones?.includes(cleanPhone));
+
+    if ((isDeletedById || isDeletedByPhone) && !isGoogleLogin) {
+      return res.status(410).json({ error: 'USER_DELETED', deleted: true });
+    }
+
     let existing =
       db.users[user.id] ||
       Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone);
 
     if (!existing) {
+      if (isDeletedById && isGoogleLogin) {
+        db.deletedUserIds = (db.deletedUserIds || []).filter((id) => id !== String(user.id));
+        if (cleanPhone) {
+          db.deletedPhones = (db.deletedPhones || []).filter((p) => p !== cleanPhone);
+        }
+      }
       const now = Date.now();
       existing = {
         id: String(user.id),
@@ -1041,13 +1066,15 @@ export function createApiApp() {
   // Player Live State Polling / Refresh
   app.get('/api/player/state', (req: Request, res: Response) => {
     const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
-    const user = userId ? db.users[userId] : undefined;
+    const isDeleted = Boolean(userId && db.deletedUserIds?.includes(userId));
+    const user = userId && !isDeleted ? db.users[userId] : undefined;
     if (user) {
       user.lastSeenAt = Date.now();
     }
 
     return res.json({
       serverTime: Date.now(),
+      deleted: isDeleted,
       user: user ? sanitizeUser(user) : null,
       balance: user ? user.balance : 0,
       historyByMode: db.historyByMode,
@@ -1313,6 +1340,12 @@ export function createApiApp() {
       for (const lu of localUsers) {
         if (!lu || !lu.id || !lu.phone) continue;
         const cleanPhone = normalizePhone(lu.phone);
+        if (
+          db.deletedUserIds?.includes(String(lu.id)) ||
+          (cleanPhone && db.deletedPhones?.includes(cleanPhone))
+        ) {
+          continue;
+        }
         const existing =
           db.users[lu.id] ||
           Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone);
@@ -1521,9 +1554,23 @@ export function createApiApp() {
     if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    delete db.users[req.params.userId];
+    const targetId = String(req.params.userId || '').trim();
+    const targetUser = db.users[targetId];
+    if (!Array.isArray(db.deletedUserIds)) db.deletedUserIds = [];
+    if (!Array.isArray(db.deletedPhones)) db.deletedPhones = [];
+    if (targetId && !db.deletedUserIds.includes(targetId)) {
+      db.deletedUserIds.push(targetId);
+    }
+    if (targetUser?.phone) {
+      const cleanPhone = normalizePhone(targetUser.phone);
+      if (cleanPhone && !db.deletedPhones.includes(cleanPhone)) {
+        db.deletedPhones.push(cleanPhone);
+      }
+    }
+    delete db.users[targetId];
+    db.bets = db.bets.filter((b) => b.userId !== targetId);
     saveDatabase();
-    broadcastEvent('state_changed', { reason: 'user_deleted', userId: req.params.userId });
+    broadcastEvent('state_changed', { reason: 'user_deleted', userId: targetId });
     return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 
@@ -1727,6 +1774,13 @@ export function createApiApp() {
   app.post('/api/admin/reset-all', (req: Request, res: Response) => {
     if (!verifyPin(req.body?.pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!Array.isArray(db.deletedUserIds)) db.deletedUserIds = [];
+    if (!Array.isArray(db.deletedPhones)) db.deletedPhones = [];
+    for (const u of Object.values(db.users)) {
+      if (u.id && !db.deletedUserIds.includes(u.id)) db.deletedUserIds.push(u.id);
+      const cp = normalizePhone(u.phone);
+      if (cp && !db.deletedPhones.includes(cp)) db.deletedPhones.push(cp);
     }
     db.users = {};
     db.transactions = [];

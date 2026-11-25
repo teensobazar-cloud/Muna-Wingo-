@@ -530,15 +530,23 @@ export function subscribePlayerFirestoreState(
     onUserUpdate?: (data: { balance: number; referralEarnings: number; fullName?: string }) => void;
     onTransactionsUpdate?: (txs: PaymentTransaction[]) => void;
     onBetsUpdate?: (bets: UserBet[]) => void;
+    onUserDeleted?: () => void;
   },
   onError?: (err: Error) => void
 ): () => void {
   const safeUid = sanitizeFirestoreId(uid, 'USR');
+  let sawExistingUserDoc = false;
 
   const unsubUser = onSnapshot(
     doc(db, 'users', safeUid),
     (snap) => {
-      if (!snap.exists()) return;
+      if (!snap.exists()) {
+        if (sawExistingUserDoc || !snap.metadata.fromCache) {
+          callbacks.onUserDeleted?.();
+        }
+        return;
+      }
+      sawExistingUserDoc = true;
       const d = snap.data();
       callbacks.onUserUpdate?.({
         balance: clampNumber(d.balance, 0, 100000000, 0),
@@ -773,12 +781,29 @@ export function subscribeAdminFirestoreState(
 
 export async function pushAdminSnapshotToFirestore(
   users: RegisteredUser[],
-  transactions: PaymentTransaction[]
+  transactions: PaymentTransaction[],
+  deletedUserIds: string[] = []
 ): Promise<number> {
   if (!isVerifiedGoogleAdmin(auth.currentUser)) return 0;
   let synced = 0;
 
+  const deletedSet = new Set(deletedUserIds.map((id) => sanitizeFirestoreId(id, 'USR')));
+
+  // Remove any deleted users that may still exist in Firestore
+  try {
+    const existingUsersSnap = await getDocs(query(collection(db, 'users'), limit(200)));
+    for (const uDoc of existingUsersSnap.docs) {
+      if (deletedSet.has(uDoc.id)) {
+        await adminDeleteUserInFirestore(uDoc.id).catch(() => {});
+      }
+    }
+  } catch {
+    // ignore listing issues
+  }
+
   for (const u of users) {
+    const safeUid = sanitizeFirestoreId(u.id, 'USR');
+    if (deletedSet.has(safeUid)) continue;
     await adminUpsertUserToFirestore(u);
     synced += 1;
   }
