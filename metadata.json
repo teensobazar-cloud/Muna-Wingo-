@@ -1,0 +1,6 @@
+{
+  "name": "منا ونگو - Muna WinGo",
+  "description": "منا ونگو آفیشل لاٹری گیم مع ایزی پیسہ اور جیز کیش ڈپازٹ و وڈرا سہولت - Muna WinGo 1-Minute Color & Number Prediction Game",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

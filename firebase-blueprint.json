@@ -1,0 +1,405 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Player wallet and account metadata (no PII fields).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Player display name",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "balance": {
+          "type": "number",
+          "description": "Current wallet balance in PKR"
+        },
+        "referralEarnings": {
+          "type": "number",
+          "description": "Total earned referral commission in PKR"
+        },
+        "inviteCode": {
+          "type": "string",
+          "description": "Optional referrer ID or code",
+          "maxLength": 64
+        },
+        "role": {
+          "type": "string",
+          "description": "Account role",
+          "enum": ["player"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp"
+        }
+      },
+      "required": ["uid", "fullName", "balance", "referralEarnings", "role", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII sub-document for player contact details.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Player mobile number",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified player email",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["uid", "phone", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized administrator registry document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Admin Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Admin email address",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "PaymentTransaction": {
+      "title": "PaymentTransaction",
+      "description": "Deposit or withdrawal request with TRX ID and admin approval status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Transaction ID",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "description": "Player display name",
+          "maxLength": 80
+        },
+        "type": {
+          "type": "string",
+          "description": "Transaction type",
+          "enum": ["deposit", "withdraw"],
+          "maxLength": 16
+        },
+        "method": {
+          "type": "string",
+          "description": "Payment channel",
+          "enum": ["easypaisa", "jazzcash"],
+          "maxLength": 16
+        },
+        "amount": {
+          "type": "number",
+          "description": "Transaction amount in PKR"
+        },
+        "bonusAmount": {
+          "type": "number",
+          "description": "Optional deposit bonus in PKR"
+        },
+        "accountNumber": {
+          "type": "string",
+          "description": "Sender or payout account number",
+          "minLength": 5,
+          "maxLength": 32
+        },
+        "accountTitle": {
+          "type": "string",
+          "description": "Account title",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "trxId": {
+          "type": "string",
+          "description": "Bank or wallet TRX reference",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Verification status",
+          "enum": ["pending", "completed", "rejected", "processing"],
+          "maxLength": 16
+        },
+        "note": {
+          "type": "string",
+          "description": "Status note",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["id", "userId", "type", "method", "amount", "accountNumber", "accountTitle", "status", "createdAt", "updatedAt"]
+    },
+    "UserBet": {
+      "title": "UserBet",
+      "description": "Player prediction bet record for a round.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Bet ID",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "description": "Player name",
+          "maxLength": 80
+        },
+        "mode": {
+          "type": "number",
+          "description": "Round duration seconds (30, 60, 180, 300)"
+        },
+        "period": {
+          "type": "string",
+          "description": "Round period identifier",
+          "minLength": 6,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "description": "Bet category",
+          "enum": ["color", "number", "bigSmall"],
+          "maxLength": 16
+        },
+        "selection": {
+          "type": "string",
+          "description": "Chosen selection serialized cleanly",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total bet stake in PKR"
+        },
+        "multiplier": {
+          "type": "number",
+          "description": "Bet multiplier"
+        },
+        "status": {
+          "type": "string",
+          "description": "Bet settlement status",
+          "enum": ["pending", "won", "lost"],
+          "maxLength": 16
+        },
+        "winAmount": {
+          "type": "number",
+          "description": "Payout amount in PKR"
+        },
+        "profit": {
+          "type": "number",
+          "description": "Net profit in PKR"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["id", "userId", "mode", "period", "category", "selection", "totalAmount", "multiplier", "status", "winAmount", "createdAt", "updatedAt"]
+    },
+    "GameModeState": {
+      "title": "GameModeState",
+      "description": "Live game mode forced outcome configuration managed by admin.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "number",
+          "description": "Game mode duration seconds"
+        },
+        "forcedKind": {
+          "type": "string",
+          "description": "Forced outcome kind or auto",
+          "enum": ["auto", "number", "bigSmall", "color"],
+          "maxLength": 16
+        },
+        "forcedNumber": {
+          "type": "number",
+          "description": "Optional forced digit 0-9"
+        },
+        "forcedBigSmall": {
+          "type": "string",
+          "description": "Optional forced Big or Small",
+          "enum": ["Big", "Small"],
+          "maxLength": 8
+        },
+        "forcedColor": {
+          "type": "string",
+          "description": "Optional forced color",
+          "enum": ["green", "violet", "red"],
+          "maxLength": 16
+        },
+        "targetPeriod": {
+          "type": "string",
+          "description": "Target period ID",
+          "maxLength": 32
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Admin UID that updated mode state",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["mode", "forcedKind", "updatedByUid", "updatedAt"]
+    },
+    "DrawRecord": {
+      "title": "DrawRecord",
+      "description": "Completed draw result for a specific mode and period.",
+      "type": "object",
+      "properties": {
+        "period": {
+          "type": "string",
+          "description": "Period identifier",
+          "minLength": 6,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "number": {
+          "type": "number",
+          "description": "Winning digit 0-9"
+        },
+        "bigSmall": {
+          "type": "string",
+          "description": "Big or Small result",
+          "enum": ["Big", "Small"],
+          "maxLength": 8
+        },
+        "primaryColor": {
+          "type": "string",
+          "description": "Primary color result",
+          "enum": ["green", "red"],
+          "maxLength": 16
+        },
+        "hasViolet": {
+          "type": "boolean",
+          "description": "True for 0 or 5"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["period", "number", "bigSmall", "primaryColor", "hasViolet", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Player wallet balance and public display metadata."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Owner-only and admin-only private contact PII (phone, email)."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Admin role registry documents."
+    },
+    "/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/PaymentTransaction" },
+      "description": "Player deposit and withdrawal ledger."
+    },
+    "/bets/{betId}": {
+      "schema": { "$ref": "#/entities/UserBet" },
+      "description": "Player betting history and live pending bets."
+    },
+    "/game_modes/{modeId}": {
+      "schema": { "$ref": "#/entities/GameModeState" },
+      "description": "Admin-controlled round outcome overrides per game mode."
+    },
+    "/game_modes/{modeId}/draws/{periodId}": {
+      "schema": { "$ref": "#/entities/DrawRecord" },
+      "description": "Completed draw history records per game mode."
+    }
+  }
+}

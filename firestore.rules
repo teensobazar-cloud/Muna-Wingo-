@@ -1,0 +1,290 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'teensobazar@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'fullName', 'balance', 'referralEarnings', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'fullName', 'balance', 'referralEarnings', 'inviteCode', 'role', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && (data.uid == request.auth.uid || isAdmin())
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 80
+        && data.balance is number && data.balance >= 0 && data.balance <= 100000000
+        && data.referralEarnings is number && data.referralEarnings >= 0 && data.referralEarnings <= 100000000
+        && data.role == 'player'
+        && (!('inviteCode' in data) || (data.inviteCode is string && data.inviteCode.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'phone', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'phone', 'email', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && (data.uid == request.auth.uid || isAdmin())
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24
+        && (!('email' in data) || (data.email is string && data.email.size() <= 160))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'userId', 'type', 'method', 'amount', 'accountNumber', 'accountTitle', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'userName', 'type', 'method', 'amount', 'bonusAmount', 'accountNumber', 'accountTitle', 'trxId', 'status', 'note', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.userId)
+        && (data.userId == request.auth.uid || isAdmin())
+        && (!('userName' in data) || (data.userName is string && data.userName.size() <= 80))
+        && data.type in ['deposit', 'withdraw']
+        && data.method in ['easypaisa', 'jazzcash']
+        && data.amount is number && data.amount > 0 && data.amount <= 10000000
+        && (!('bonusAmount' in data) || (data.bonusAmount is number && data.bonusAmount >= 0 && data.bonusAmount <= 10000000))
+        && data.accountNumber is string && data.accountNumber.size() >= 5 && data.accountNumber.size() <= 32
+        && data.accountTitle is string && data.accountTitle.size() >= 1 && data.accountTitle.size() <= 80
+        && (!('trxId' in data) || (data.trxId is string && data.trxId.size() <= 64))
+        && data.status in ['pending', 'completed', 'rejected', 'processing']
+        && (!('note' in data) || (data.note is string && data.note.size() <= 200))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBet(data) {
+      return data.keys().hasAll(['id', 'userId', 'mode', 'period', 'category', 'selection', 'totalAmount', 'multiplier', 'status', 'winAmount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'userName', 'mode', 'period', 'category', 'selection', 'totalAmount', 'multiplier', 'status', 'winAmount', 'profit', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.userId)
+        && (data.userId == request.auth.uid || isAdmin())
+        && (!('userName' in data) || (data.userName is string && data.userName.size() <= 80))
+        && data.mode in [30, 60, 180, 300]
+        && data.period is string && data.period.size() >= 6 && data.period.size() <= 32 && data.period.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.category in ['color', 'number', 'bigSmall']
+        && data.selection is string && data.selection.size() >= 1 && data.selection.size() <= 32
+        && data.totalAmount is number && data.totalAmount >= 1 && data.totalAmount <= 10000000
+        && data.multiplier is number && data.multiplier >= 1 && data.multiplier <= 10000
+        && data.status in ['pending', 'won', 'lost']
+        && data.winAmount is number && data.winAmount >= 0 && data.winAmount <= 100000000
+        && (!('profit' in data) || (data.profit is number && data.profit >= -10000000 && data.profit <= 100000000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGameMode(data) {
+      return data.keys().hasAll(['mode', 'forcedKind', 'updatedByUid', 'updatedAt'])
+        && data.keys().hasOnly(['mode', 'forcedKind', 'forcedNumber', 'forcedBigSmall', 'forcedColor', 'targetPeriod', 'updatedByUid', 'updatedAt'])
+        && data.mode in [30, 60, 180, 300]
+        && data.forcedKind in ['auto', 'number', 'bigSmall', 'color']
+        && (!('forcedNumber' in data) || (data.forcedNumber is number && data.forcedNumber >= 0 && data.forcedNumber <= 9))
+        && (!('forcedBigSmall' in data) || data.forcedBigSmall in ['Big', 'Small'])
+        && (!('forcedColor' in data) || data.forcedColor in ['green', 'violet', 'red'])
+        && (!('targetPeriod' in data) || (data.targetPeriod is string && data.targetPeriod.size() <= 32))
+        && isValidId(data.updatedByUid)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDrawRecord(data) {
+      return data.keys().hasAll(['period', 'number', 'bigSmall', 'primaryColor', 'hasViolet', 'createdAt'])
+        && data.keys().hasOnly(['period', 'number', 'bigSmall', 'primaryColor', 'hasViolet', 'createdAt'])
+        && data.period is string && data.period.size() >= 6 && data.period.size() <= 32 && data.period.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.number is number && data.number >= 0 && data.number <= 9
+        && data.bigSmall in ['Big', 'Small']
+        && data.primaryColor in ['green', 'red']
+        && data.hasViolet is bool
+        && data.createdAt is timestamp;
+    }
+
+    match /test/connection {
+      allow get: if true;
+      allow write: if false;
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isBootstrappedAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming(), userId)
+        && incoming().createdAt == request.time;
+      allow update: if isBootstrappedAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+      allow delete: if isBootstrappedAdmin() && isValidId(userId) && userId != request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isVerified() && (resource.data.uid == request.auth.uid || isBootstrappedAdmin());
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && (incoming().uid == request.auth.uid || isAdmin())
+        && ((incoming().balance >= 0 && incoming().balance <= 10 && incoming().referralEarnings == 0) || isAdmin())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'balance', 'referralEarnings', 'updatedAt'])) ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'balance', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && (isOwner(userId) || isAdmin());
+        allow list: if isVerified() && (resource.data.uid == request.auth.uid || isBootstrappedAdmin());
+        allow create: if isVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && (isOwner(userId) || isAdmin())
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && isValidUserPrivateInfo(incoming(), userId)
+          && (isOwner(userId) || isAdmin())
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'email', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(docId) && isAdmin();
+      }
+    }
+
+    match /transactions/{txId} {
+      allow get: if isVerified() && isValidId(txId) && ((resource != null && existing().userId == request.auth.uid) || isAdmin());
+      allow list: if isVerified() && (resource.data.userId == request.auth.uid || isBootstrappedAdmin());
+      allow create: if isVerified()
+        && isValidId(txId)
+        && isValidTransaction(incoming())
+        && incoming().id == txId
+        && ((incoming().userId == request.auth.uid && incoming().status == 'pending') || isAdmin())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(txId)
+        && isValidTransaction(incoming())
+        && isAdmin()
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().type == existing().type
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().status == 'pending' || isAdmin())
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'amount', 'bonusAmount', 'method', 'accountNumber', 'accountTitle', 'trxId', 'note', 'updatedAt'
+        ]);
+      allow delete: if isVerified() && isValidId(txId) && isAdmin();
+    }
+
+    match /bets/{betId} {
+      allow get: if isVerified() && isValidId(betId) && ((resource != null && existing().userId == request.auth.uid) || isAdmin());
+      allow list: if isVerified() && (resource.data.userId == request.auth.uid || isBootstrappedAdmin());
+      allow create: if isVerified()
+        && isValidId(betId)
+        && isValidBet(incoming())
+        && incoming().id == betId
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().winAmount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(betId)
+        && isValidBet(incoming())
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'winAmount', 'profit', 'updatedAt'])) ||
+          (existing().userId == request.auth.uid && existing().status == 'pending' && incoming().status in ['won', 'lost'] && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'winAmount', 'profit', 'updatedAt']))
+        );
+      allow delete: if isVerified() && isValidId(betId) && isAdmin();
+    }
+
+    match /game_modes/{modeId} {
+      allow get: if isVerified() && isValidId(modeId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create, update: if isVerified()
+        && isValidId(modeId)
+        && isAdmin()
+        && isValidGameMode(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow delete: if isVerified() && isValidId(modeId) && isAdmin();
+
+      match /draws/{periodId} {
+        allow get: if isVerified() && isValidId(modeId) && isValidId(periodId);
+        allow list: if isVerified() && resource.data.number >= 0;
+        allow create: if isVerified()
+          && isValidId(modeId)
+          && isValidId(periodId)
+          && isAdmin()
+          && exists(/databases/$(database)/documents/game_modes/$(modeId))
+          && isValidDrawRecord(incoming())
+          && incoming().period == periodId
+          && incoming().createdAt == request.time;
+        allow update: if false;
+        allow delete: if isVerified() && isValidId(modeId) && isValidId(periodId) && isAdmin();
+      }
+    }
+  }
+}
