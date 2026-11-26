@@ -111,27 +111,51 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
               return (
                 <div
                   key={`${item.period}-${idx}-${item.timestamp || idx}`}
-                  className="grid grid-cols-4 py-3 px-3 text-center items-center text-xs font-serif italic hover:bg-slate-50/80 transition-colors"
+                  className="py-2.5 px-3 hover:bg-slate-50/80 transition-colors"
                 >
-                  {/* Period */}
-                  <span className="font-sans font-medium text-slate-700 tracking-tight">
-                    {item.period}
-                  </span>
+                  <div className="grid grid-cols-4 text-center items-center text-xs font-serif italic">
+                    {/* Period */}
+                    <span className="font-sans font-medium text-slate-700 tracking-tight">
+                      {item.period}
+                    </span>
 
-                  {/* Number */}
-                  <span className={`text-base font-black font-sans ${numColor}`}>
-                    {item.number}
-                  </span>
+                    {/* Number */}
+                    <span className={`text-base font-black font-sans ${numColor}`}>
+                      {item.number}
+                    </span>
 
-                  {/* Big Small */}
-                  <span className="text-slate-700 font-semibold">
-                    {item.bigSmall}
-                  </span>
+                    {/* Big Small */}
+                    <span className="text-slate-700 font-semibold">
+                      {item.bigSmall}
+                    </span>
 
-                  {/* Color dots */}
-                  <div className="flex justify-center items-center">
-                    <ColorDot color={item.colors} size="sm" />
+                    {/* Color dots */}
+                    <div className="flex justify-center items-center">
+                      <ColorDot color={item.colors} size="sm" />
+                    </div>
                   </div>
+                  {(item.commitHash || item.serverSeed) && (
+                    <div className="mt-1 flex items-center justify-center gap-2 text-[9px] font-mono text-slate-400">
+                      {item.commitHash && (
+                        <span
+                          title={`SHA-256 Hash: ${item.commitHash}`}
+                          onClick={() => navigator.clipboard?.writeText(item.commitHash || '')}
+                          className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 cursor-pointer hover:bg-slate-200"
+                        >
+                          Hash: {item.commitHash.slice(0, 8)}...{item.commitHash.slice(-4)}
+                        </span>
+                      )}
+                      {item.serverSeed && (
+                        <span
+                          title={`Revealed Server Seed: ${item.serverSeed}`}
+                          onClick={() => navigator.clipboard?.writeText(item.serverSeed || '')}
+                          className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 cursor-pointer hover:bg-emerald-100"
+                        >
+                          Seed: {item.serverSeed.slice(0, 8)}...
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -307,6 +331,11 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
                       {new Date(bet.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                     </span>
                   </div>
+                  {bet.roundHash && (
+                    <div className="mt-1 text-[9px] font-mono text-slate-400 truncate">
+                      Round Hash: {bet.roundHash.slice(0, 12)}...{bet.roundHash.slice(-6)}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

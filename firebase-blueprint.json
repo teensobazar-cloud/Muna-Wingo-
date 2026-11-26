@@ -267,6 +267,11 @@
           "type": "number",
           "description": "Net profit in PKR"
         },
+        "roundHash": {
+          "type": "string",
+          "description": "Pre-committed SHA-256 round fairness hash",
+          "maxLength": 128
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -363,6 +368,16 @@
           "type": "boolean",
           "description": "True for 0 or 5"
         },
+        "commitHash": {
+          "type": "string",
+          "description": "Pre-committed SHA-256 fairness hash",
+          "maxLength": 128
+        },
+        "serverSeed": {
+          "type": "string",
+          "description": "Revealed round seed after settlement",
+          "maxLength": 128
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -370,6 +385,39 @@
         }
       },
       "required": ["period", "number", "bigSmall", "primaryColor", "hasViolet", "createdAt"]
+    },
+    "BlockedPhone": {
+      "title": "BlockedPhone",
+      "description": "Blocked mobile number registry created when admin permanently deletes a user.",
+      "type": "object",
+      "properties": {
+        "phoneId": {
+          "type": "string",
+          "description": "Normalized mobile number document ID",
+          "minLength": 7,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Blocked mobile number",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "blockedByUid": {
+          "type": "string",
+          "description": "Admin UID who blocked the phone",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "blockedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when blocked"
+        }
+      },
+      "required": ["phoneId", "phone", "blockedByUid", "blockedAt"]
     }
   },
   "firestore": {
@@ -384,6 +432,10 @@
     "/admins/{userId}": {
       "schema": { "$ref": "#/entities/AdminRecord" },
       "description": "Admin role registry documents."
+    },
+    "/blocked_phones/{phoneId}": {
+      "schema": { "$ref": "#/entities/BlockedPhone" },
+      "description": "Admin-managed blocked mobile numbers preventing deleted users from re-registering."
     },
     "/transactions/{txId}": {
       "schema": { "$ref": "#/entities/PaymentTransaction" },

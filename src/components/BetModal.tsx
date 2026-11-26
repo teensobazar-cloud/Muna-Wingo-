@@ -12,6 +12,7 @@ interface BetModalProps {
   userBalance: number;
   initialMultiplier: number;
   isLocked?: boolean;
+  commitHash?: string;
   onConfirmBet: (contractMoney: number, quantity: number, multiplier: number) => void;
   onOpenDeposit: () => void;
   language: 'ur' | 'en';
@@ -25,6 +26,7 @@ export const BetModal: React.FC<BetModalProps> = ({
   userBalance,
   initialMultiplier,
   isLocked = false,
+  commitHash,
   onConfirmBet,
   onOpenDeposit,
   language
@@ -74,20 +76,20 @@ export const BetModal: React.FC<BetModalProps> = ({
         return {
           title: language === 'ur' ? 'سبز منتخب کریں' : 'Select Green',
           bg: 'bg-[#18b660]',
-          rate: '2X'
+          rate: '1.95X (92% Fair RTP)'
         };
       }
       if (selection === 'violet') {
         return {
           title: language === 'ur' ? 'جامنی منتخب کریں' : 'Select Violet',
           bg: 'bg-[#9c27b0]',
-          rate: '4.5X'
+          rate: '4.6X (92% Fair RTP)'
         };
       }
       return {
         title: language === 'ur' ? 'سرخ منتخب کریں' : 'Select Red',
         bg: 'bg-[#ea384c]',
-        rate: '2X'
+        rate: '1.95X (92% Fair RTP)'
       };
     }
     if (category === 'bigSmall') {
@@ -95,19 +97,19 @@ export const BetModal: React.FC<BetModalProps> = ({
         return {
           title: language === 'ur' ? 'بڑا (Big 5-9)' : 'Select Big',
           bg: 'bg-[#f5a623]',
-          rate: '2X'
+          rate: '1.84X (92% Fair RTP)'
         };
       }
       return {
         title: language === 'ur' ? 'چھوٹا (Small 0-4)' : 'Select Small',
         bg: 'bg-[#5dade2]',
-        rate: '2X'
+        rate: '1.84X (92% Fair RTP)'
       };
     }
     return {
       title: language === 'ur' ? `نمبر ${selection} منتخب کریں` : `Select Number ${selection}`,
       bg: 'bg-[#ea384c]',
-      rate: '9X'
+      rate: '9.2X (92% Fair RTP)'
     };
   };
 
@@ -155,6 +157,13 @@ export const BetModal: React.FC<BetModalProps> = ({
               Rs {userBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
             </span>
           </div>
+
+          {commitHash && (
+            <div className="flex items-center justify-between text-[10px] bg-slate-100/90 px-2.5 py-1.5 rounded-xl border border-slate-200 text-slate-600 font-mono">
+              <span className="font-sans font-bold text-emerald-700">Provably Fair SHA-256:</span>
+              <span className="truncate max-w-[190px]">{commitHash}</span>
+            </div>
+          )}
 
           {/* Locked in last 5 seconds alert */}
           {isLocked && (

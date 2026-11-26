@@ -7,6 +7,9 @@ export interface DrawResult {
   bigSmall: BigSmallType;
   colors: ColorType[];
   timestamp: number;
+  commitHash?: string;
+  serverSeed?: string;
+  isManualOverride?: boolean;
 }
 
 export type BetCategory = 'color' | 'number' | 'bigSmall';
@@ -27,6 +30,7 @@ export interface UserBet {
   winAmount: number;
   profit?: number;
   multiplier: number;
+  roundHash?: string;
   timestamp: number;
 }
 

@@ -70,6 +70,7 @@ interface AdminPanelProps {
   activeMode: GameTimeOption;
   // Global Server Users & Summary
   adminUsers?: RegisteredUser[];
+  blockedPhones?: string[];
   adminSummary?: AdminSummary;
   lastSyncedAt?: number;
   onRefreshAdmin?: () => Promise<void> | void;
@@ -79,6 +80,7 @@ interface AdminPanelProps {
     amount: number
   ) => Promise<void> | void;
   onDeleteUser?: (userId: string) => Promise<void> | void;
+  onUnblockPhone?: (phone: string) => Promise<void> | void;
   onPinVerified?: (pin: string, snapshot?: any) => void;
   // Transactions
   transactions: PaymentTransaction[];
@@ -143,11 +145,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   currentPeriods,
   activeMode,
   adminUsers,
+  blockedPhones = [],
   adminSummary,
   lastSyncedAt,
   onRefreshAdmin,
   onUpdateUserBalance,
   onDeleteUser,
+  onUnblockPhone,
   onPinVerified,
   transactions,
   onApproveDeposit,
@@ -198,8 +202,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [keepPersistentLock, setKeepPersistentLock] = useState<boolean>(false);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
   const [adminNoticeIsError, setAdminNoticeIsError] = useState<boolean>(false);
-  const [localRegisteredUsers, setLocalRegisteredUsers] = useState<RegisteredUser[]>([]);
-  const [userBalancesMap, setUserBalancesMap] = useState<Record<string, number>>({});
   const [userSearch, setUserSearch] = useState<string>('');
   const [selectedBalanceUserId, setSelectedBalanceUserId] = useState<string>(currentUserId || '');
   const [zoomScreenshot, setZoomScreenshot] = useState<{
@@ -213,33 +215,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
 
-  const registeredUsers: RegisteredUser[] = lastSyncedAt
-    ? adminUsers || []
-    : adminUsers && adminUsers.length > 0
-    ? adminUsers
-    : localRegisteredUsers;
-
-  const loadUsersFromStorage = () => {
-    try {
-      const rawUsers = localStorage.getItem('muna_registered_users');
-      const parsedUsers: RegisteredUser[] = rawUsers ? JSON.parse(rawUsers) : [];
-      setLocalRegisteredUsers(
-        [...parsedUsers].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-      );
-      const rawBals = localStorage.getItem('muna_user_balances');
-      setUserBalancesMap(rawBals ? (JSON.parse(rawBals) as Record<string, number>) : {});
-    } catch {
-      setLocalRegisteredUsers([]);
-      setUserBalancesMap({});
-    }
-  };
+  // Strict DB-only user list (no localStorage resurrection!)
+  const registeredUsers: RegisteredUser[] = adminUsers || [];
 
   useEffect(() => {
     if (isOpen) {
       setSelectedMode(activeMode);
       setRigSecondsLeft(getSecondsRemainingForMode(activeMode));
       setRigPeriodNow(getPeriodForMode(activeMode));
-      loadUsersFromStorage();
       if (isAuthenticated) {
         onRefreshAdmin?.();
       }
@@ -408,27 +391,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const handleDeleteRegisteredUser = async (userId: string) => {
-    try {
-      const updated = registeredUsers.filter((u) => u.id !== userId);
-      setLocalRegisteredUsers(updated);
-      const rawUsers = localStorage.getItem('muna_registered_users');
-      const parsedUsers: RegisteredUser[] = rawUsers ? JSON.parse(rawUsers) : [];
-      localStorage.setItem(
-        'muna_registered_users',
-        JSON.stringify(parsedUsers.filter((u) => u.id !== userId))
-      );
-      const nextBals = { ...userBalancesMap };
-      delete nextBals[userId];
-      setUserBalancesMap(nextBals);
-      localStorage.setItem('muna_user_balances', JSON.stringify(nextBals));
-    } catch {
-      // ignore
-    }
     if (onDeleteUser) {
       await onDeleteUser(userId);
     }
     soundManager.playToom(1);
-    showNotice(language === 'ur' ? 'یوزر ریکارڈ ڈیلیٹ ہو گیا!' : 'User removed');
+    showNotice('User permanently deleted & mobile number blocked');
   };
 
   const nowTs = Date.now();
@@ -444,7 +411,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           ? u.balance
           : currentUserId === u.id
           ? balance
-          : userBalancesMap[u.id] || 0),
+          : 0),
       0
     );
   const completedDepositsList = transactions.filter(
@@ -625,7 +592,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   onClick={async () => {
                     soundManager.playClick();
                     setIsManualSyncing(true);
-                    loadUsersFromStorage();
                     await onRefreshAdmin?.();
                     setIsManualSyncing(false);
                     showNotice('Synced live with server & cloud');
@@ -748,7 +714,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
               <button
                 onClick={() => {
-                  loadUsersFromStorage();
                   onRefreshAdmin?.();
                   setActiveTab('users');
                 }}
@@ -1484,7 +1449,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       type="button"
                       onClick={() => {
                         soundManager.playClick();
-                        loadUsersFromStorage();
                         onRefreshAdmin?.();
                         showNotice(language === 'ur' ? 'تمام یوزرز اور حساب کتاب اپ ڈیٹ ہو گیا!' : 'Users & accounts refreshed');
                       }}
@@ -1531,8 +1495,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               ? user.balance
                               : isCurrent
                               ? balance
-                              : typeof userBalancesMap[user.id] === 'number'
-                              ? userBalancesMap[user.id]
                               : 0;
                           const uDep =
                             typeof user.totalDeposited === 'number'
@@ -1645,10 +1607,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteRegisteredUser(user.id)}
-                                    className="p-1 rounded bg-rose-900/70 hover:bg-rose-600 text-rose-200 hover:text-white cursor-pointer"
-                                    title="Delete User"
+                                    className="px-2 py-1 rounded bg-rose-900/70 hover:bg-rose-600 text-rose-200 hover:text-white cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+                                    title="Delete User Permanently & Block Mobile Number"
                                   >
                                     <Trash2 className="w-3 h-3" />
+                                    <span>Delete &amp; Block</span>
                                   </button>
                                 </div>
                               </div>
@@ -1657,6 +1620,42 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         })
                     )}
                   </div>
+
+                  {/* Blocked Mobile Numbers Blocklist */}
+                  {blockedPhones.length > 0 && (
+                    <div className="bg-rose-950/35 border border-rose-700/40 rounded-2xl p-3 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-rose-300 flex items-center gap-1.5">
+                          <Phone className="w-3.5 h-3.5" />
+                          <span>Blocked Mobile Numbers ({blockedPhones.length})</span>
+                        </span>
+                        <span className="text-[10px] text-rose-300/80">Deleted accounts cannot re-register</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {blockedPhones.map((ph) => (
+                          <div
+                            key={ph}
+                            className="inline-flex items-center gap-2 px-2.5 py-1 rounded-xl bg-slate-900 border border-rose-600/40 text-xs font-mono text-slate-200"
+                          >
+                            <span>{ph}</span>
+                            {onUnblockPhone && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  soundManager.playClick();
+                                  await onUnblockPhone(ph);
+                                  showNotice(`Unblocked ${ph}`);
+                                }}
+                                className="text-[10px] font-sans font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer"
+                              >
+                                Unblock
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2763,7 +2762,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     ? targetUser.balance
                     : targetUser.id === currentUserId
                     ? balance
-                    : userBalancesMap[targetUser.id] || 0
+                    : 0
                   : balance;
 
                 const applyTargetBalance = async (
@@ -2819,7 +2818,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 ? u.balance
                                 : u.id === currentUserId
                                 ? balance
-                                : userBalancesMap[u.id] || 0;
+                                : 0;
                             return (
                               <option key={u.id} value={u.id}>
                                 {u.fullName} ({u.phone}) — Rs {uBal.toLocaleString()}

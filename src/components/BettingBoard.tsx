@@ -67,36 +67,36 @@ export const BettingBoard: React.FC<BettingBoardProps> = ({
 
   return (
     <div className="w-full px-3 py-2 space-y-3">
-      {/* Row 1: Color Betting Buttons (Green 2X, Violet 4.5X, Red 2X) */}
+      {/* Row 1: Color Betting Buttons (Green 1.95X, Violet 4.6X, Red 1.95X) */}
       <div className="grid grid-cols-3 gap-2.5">
         {/* Green */}
         <button
           disabled={isLocked || isScanning}
           onClick={() => handlePick('color', 'green')}
-          className="relative group py-2.5 px-2 rounded-xl bg-gradient-to-r from-[#18b660] to-[#149d53] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between px-3 cursor-pointer"
+          className="relative group py-2.5 px-3 rounded-xl bg-gradient-to-r from-[#18b660] to-[#149d53] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between cursor-pointer"
         >
           <span className="font-serif italic font-semibold">{language === 'ur' ? 'سبز' : 'Green'}</span>
-          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">2X</span>
+          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">1.95X</span>
         </button>
 
         {/* Violet */}
         <button
           disabled={isLocked || isScanning}
           onClick={() => handlePick('color', 'violet')}
-          className="relative group py-2.5 px-2 rounded-xl bg-gradient-to-r from-[#9c27b0] to-[#7b1fa2] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between px-3 cursor-pointer"
+          className="relative group py-2.5 px-3 rounded-xl bg-gradient-to-r from-[#9c27b0] to-[#7b1fa2] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between cursor-pointer"
         >
           <span className="font-serif italic font-semibold">{language === 'ur' ? 'جامنی' : 'Violet'}</span>
-          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">4.5X</span>
+          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">4.6X</span>
         </button>
 
         {/* Red */}
         <button
           disabled={isLocked || isScanning}
           onClick={() => handlePick('color', 'red')}
-          className="relative group py-2.5 px-2 rounded-xl bg-gradient-to-r from-[#ea384c] to-[#d32f42] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between px-3 cursor-pointer"
+          className="relative group py-2.5 px-3 rounded-xl bg-gradient-to-r from-[#ea384c] to-[#d32f42] text-white font-bold text-sm sm:text-base shadow-md active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-105 flex items-center justify-between cursor-pointer"
         >
           <span className="font-serif italic font-semibold">{language === 'ur' ? 'سرخ' : 'Red'}</span>
-          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">2X</span>
+          <span className="text-xs bg-white/20 px-1.5 py-0.5 rounded-md font-mono font-bold">1.95X</span>
         </button>
       </div>
 
@@ -196,7 +196,7 @@ export const BettingBoard: React.FC<BettingBoardProps> = ({
         </div>
       </div>
 
-      {/* Row 5: Big 2X / Small 2X Dual Bar */}
+      {/* Row 5: Big 1.84X / Small 1.84X Dual Bar */}
       <div className="grid grid-cols-2 gap-0 rounded-2xl overflow-hidden shadow-md">
         {/* Big (5-9) */}
         <button
@@ -207,7 +207,7 @@ export const BettingBoard: React.FC<BettingBoardProps> = ({
           <span className="font-serif italic text-base sm:text-lg">
             {language === 'ur' ? 'بڑا (5-9)' : 'Big'}
           </span>
-          <span className="text-xs bg-black/15 px-2 py-0.5 rounded-full font-mono font-bold">2X</span>
+          <span className="text-xs bg-black/15 px-2 py-0.5 rounded-full font-mono font-bold">1.84X</span>
         </button>
 
         {/* Small (0-4) */}
@@ -219,7 +219,7 @@ export const BettingBoard: React.FC<BettingBoardProps> = ({
           <span className="font-serif italic text-base sm:text-lg">
             {language === 'ur' ? 'چھوٹا (0-4)' : 'Small'}
           </span>
-          <span className="text-xs bg-black/15 px-2 py-0.5 rounded-full font-mono font-bold">2X</span>
+          <span className="text-xs bg-black/15 px-2 py-0.5 rounded-full font-mono font-bold">1.84X</span>
         </button>
       </div>
     </div>

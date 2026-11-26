@@ -28,7 +28,7 @@ import {
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   getInitialHistoryByMode,
-  generateStrategicDrawResult,
+  generateSingleDrawResult,
   getBigSmallForNumber,
   getColorsForNumber,
   calculateBetWin,
@@ -45,6 +45,7 @@ import {
   adminSyncDrawRecordToFirestore,
   adminUpdateTransactionInFirestore,
   adminUpsertUserToFirestore,
+  blockPhoneInFirestore,
   createBetInFirestore,
   createTransactionInFirestore,
   ensureAdminDocument,
@@ -54,9 +55,11 @@ import {
   signInWithGoogleFirebase,
   signOutFirebase,
   subscribeAdminFirestoreState,
+  subscribeBlockedPhonesFromFirestore,
   subscribePlayerFirestoreState,
   syncGameModeOverrideToFirestore,
   syncPlayerBalanceToFirestore,
+  unblockPhoneInFirestore,
 } from './services/firebaseSync';
 
 export default function App() {
@@ -80,7 +83,7 @@ export default function App() {
     }
   }, []);
 
-  // 2. Authenticated User & Finance State (Persisted in localStorage)
+  // 2. Authenticated User Session (Strict DB-Only Balance & State — NO localStorage balance/users)
   const [currentUser, setCurrentUser] = useState<RegisteredUser | null>(() => {
     try {
       const saved = localStorage.getItem('muna_current_user');
@@ -92,8 +95,28 @@ export default function App() {
 
   useEffect(() => {
     try {
+      localStorage.removeItem('aloye_wingo_balance');
+      localStorage.removeItem('muna_user_balances');
+      localStorage.removeItem('muna_registered_users');
+      localStorage.removeItem('muna_referral_earnings');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
       if (currentUser) {
-        localStorage.setItem('muna_current_user', JSON.stringify(currentUser));
+        localStorage.setItem(
+          'muna_current_user',
+          JSON.stringify({
+            id: currentUser.id,
+            fullName: currentUser.fullName,
+            phone: currentUser.phone,
+            inviteCode: currentUser.inviteCode,
+            createdAt: currentUser.createdAt,
+          })
+        );
       } else {
         localStorage.removeItem('muna_current_user');
       }
@@ -102,10 +125,7 @@ export default function App() {
     }
   }, [currentUser]);
 
-  const [balance, setBalance] = useState<number>(() => {
-    const saved = localStorage.getItem('aloye_wingo_balance');
-    return saved !== null ? Number(saved) : 0;
-  });
+  const [balance, setBalance] = useState<number>(0);
 
   const [transactions, setTransactions] = useState<PaymentTransaction[]>(() => {
     const saved = localStorage.getItem('aloye_wingo_transactions');
@@ -118,22 +138,11 @@ export default function App() {
   });
 
   const balanceRef = useRef<number>(balance);
+  const lastServerBalanceUpdatedAtRef = useRef<number>(0);
 
-  // Save to localStorage when changed (including per-user balance map)
   useEffect(() => {
     balanceRef.current = balance;
-    localStorage.setItem('aloye_wingo_balance', String(balance));
-    if (currentUser) {
-      try {
-        const raw = localStorage.getItem('muna_user_balances');
-        const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-        map[currentUser.id] = balance;
-        localStorage.setItem('muna_user_balances', JSON.stringify(map));
-      } catch {
-        // ignore
-      }
-    }
-  }, [balance, currentUser]);
+  }, [balance]);
 
   useEffect(() => {
     try {
@@ -156,26 +165,9 @@ export default function App() {
     }
   }, [userBets]);
 
-  // Real-time Multi-Tab synchronization for Online Gaming
+  // Multi-tab session/history listener (never syncs balance from localStorage)
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'aloye_wingo_balance' && e.newValue !== null) {
-        setBalance(Number(e.newValue));
-      }
-      if (e.key === 'aloye_wingo_transactions' && e.newValue) {
-        try {
-          setTransactions(JSON.parse(e.newValue));
-        } catch {
-          // ignore
-        }
-      }
-      if (e.key === 'aloye_wingo_bets' && e.newValue) {
-        try {
-          setUserBets(JSON.parse(e.newValue));
-        } catch {
-          // ignore
-        }
-      }
       if (e.key === 'muna_current_user') {
         try {
           setCurrentUser(e.newValue ? (JSON.parse(e.newValue) as RegisteredUser) : null);
@@ -264,6 +256,8 @@ export default function App() {
     return localStorage.getItem('muna_admin_master_pin') || '786';
   });
   const [adminUsers, setAdminUsers] = useState<RegisteredUser[]>([]);
+  const [blockedPhones, setBlockedPhones] = useState<string[]>([]);
+  const [commitHashes, setCommitHashes] = useState<Partial<Record<GameTimeOption, string>>>({});
   const [adminTransactions, setAdminTransactions] = useState<PaymentTransaction[]>([]);
   const [adminBets, setAdminBets] = useState<UserBet[]>([]);
   const [adminSummary, setAdminSummary] = useState<AdminSummary | undefined>(undefined);
@@ -403,30 +397,12 @@ export default function App() {
     return false;
   };
 
-  const purgeUsersFromLocalStorage = (idsToRemove: Set<string>, phonesToRemove?: Set<string>) => {
+  const purgeActiveSession = (idsToRemove: Set<string>, phonesToRemove?: Set<string>) => {
     try {
-      const rawUsers = localStorage.getItem('muna_registered_users');
-      if (rawUsers) {
-        const parsed = JSON.parse(rawUsers) as RegisteredUser[];
-        const filtered = parsed.filter(
-          (u) =>
-            !idsToRemove.has(u.id) &&
-            !(phonesToRemove && phonesToRemove.has(normalizePhoneKey(u.phone)))
-        );
-        localStorage.setItem('muna_registered_users', JSON.stringify(filtered));
-      }
-      const rawBals = localStorage.getItem('muna_user_balances');
-      if (rawBals) {
-        const balMap = JSON.parse(rawBals) as Record<string, number>;
-        idsToRemove.forEach((id) => delete balMap[id]);
-        localStorage.setItem('muna_user_balances', JSON.stringify(balMap));
-      }
-      const rawRefs = localStorage.getItem('muna_referral_earnings');
-      if (rawRefs) {
-        const refMap = JSON.parse(rawRefs) as Record<string, number>;
-        idsToRemove.forEach((id) => delete refMap[id]);
-        localStorage.setItem('muna_referral_earnings', JSON.stringify(refMap));
-      }
+      localStorage.removeItem('muna_registered_users');
+      localStorage.removeItem('muna_user_balances');
+      localStorage.removeItem('aloye_wingo_balance');
+      localStorage.removeItem('muna_referral_earnings');
     } catch {
       // ignore
     }
@@ -440,6 +416,10 @@ export default function App() {
       void signOutFirebase();
       currentUserRef.current = null;
       isUserSignedInRef.current = false;
+      balanceRef.current = 0;
+      setBalance(0);
+      setTransactions([]);
+      setUserBets([]);
       setCurrentUser(null);
     }
   };
@@ -469,14 +449,17 @@ export default function App() {
     users?: RegisteredUser[];
     deletedUserIds?: string[];
     deletedPhones?: string[];
+    blockedPhones?: string[];
     transactions?: PaymentTransaction[];
     bets?: UserBet[];
     summary?: AdminSummary;
     forcedNumbers?: Record<GameTimeOption, number | null>;
     forcedOutcomes?: Record<GameTimeOption, ForcedOutcomeSpec | null>;
     historyByMode?: Record<GameTimeOption, DrawResult[]>;
+    commitHashes?: Partial<Record<GameTimeOption, string>>;
   }) => {
     if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
+    if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
     let tombstonesChanged = false;
     if (Array.isArray(data.deletedUserIds)) {
       for (const id of data.deletedUserIds) {
@@ -495,9 +478,19 @@ export default function App() {
         }
       }
     }
+    if (Array.isArray(data.blockedPhones)) {
+      setBlockedPhones(data.blockedPhones);
+      for (const ph of data.blockedPhones) {
+        const cp = normalizePhoneKey(ph);
+        if (cp && !deletedPhonesRef.current.has(cp)) {
+          deletedPhonesRef.current.add(cp);
+          tombstonesChanged = true;
+        }
+      }
+    }
     if (tombstonesChanged) {
       persistDeletedTombstones();
-      purgeUsersFromLocalStorage(deletedUserIdsRef.current, deletedPhonesRef.current);
+      purgeActiveSession(deletedUserIdsRef.current, deletedPhonesRef.current);
       firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter(
         (u) => !isUserDeletedLocally(u)
       );
@@ -519,27 +512,15 @@ export default function App() {
 
   const syncLocalRecordsToAdminServer = async (pinToUse: string) => {
     try {
-      const rawUsers = localStorage.getItem('muna_registered_users');
       const rawTxs = localStorage.getItem('aloye_wingo_transactions');
-      const rawBals = localStorage.getItem('muna_user_balances');
-      const parsedLocalUsers: RegisteredUser[] = rawUsers ? JSON.parse(rawUsers) : [];
-      const localUsers = Array.isArray(parsedLocalUsers)
-        ? parsedLocalUsers.filter((u) => u && !isUserDeletedLocally(u))
-        : [];
       const localTxs = rawTxs ? JSON.parse(rawTxs) : [];
-      const balancesMap = rawBals ? JSON.parse(rawBals) : {};
-      if (
-        localUsers.length > 0 ||
-        (Array.isArray(localTxs) && localTxs.length > 0)
-      ) {
+      if (Array.isArray(localTxs) && localTxs.length > 0) {
         const res = await fetch('/api/admin/sync-local', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             pin: pinToUse,
-            users: localUsers,
             transactions: localTxs,
-            balancesMap,
           }),
         });
         if (res.ok) {
@@ -600,23 +581,28 @@ export default function App() {
     const uid = userId ?? currentUserRef.current?.id;
     const reqSeq = playerSyncSeqRef.current;
     try {
-      const url = `/api/player/state?${uid ? `userId=${encodeURIComponent(uid)}&` : ''}_t=${Date.now()}`;
+      const url = `/api/player/state?${uid ? `userId=${encodeURIComponent(uid)}&` : ''}${currentUserRef.current?.phone ? `phone=${encodeURIComponent(currentUserRef.current.phone)}&` : ''}_t=${Date.now()}`;
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       if (typeof data.serverTime === 'number') {
         setServerTimeOffset(data.serverTime);
       }
+      if (data.commitHashes) {
+        setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
+      }
       if (data.historyByMode) {
         historyByModeRef.current = data.historyByMode;
         setHistoryByMode(data.historyByMode);
       }
 
-      // If this user was deleted by admin, immediately end their active session
-      if (uid && data.deleted) {
+      // If this user was deleted or blocked by admin, immediately end their active session
+      if (uid && (data.deleted || data.blocked)) {
         deletedUserIdsRef.current.add(uid);
+        const cp = normalizePhoneKey(currentUserRef.current?.phone);
+        if (cp) deletedPhonesRef.current.add(cp);
         persistDeletedTombstones();
-        purgeUsersFromLocalStorage(new Set([uid]));
+        purgeActiveSession(new Set([uid]), cp ? new Set([cp]) : undefined);
         return;
       }
 
@@ -627,9 +613,10 @@ export default function App() {
 
       if (uid && data.user) {
         if (typeof data.balance === 'number') {
+          lastServerBalanceUpdatedAtRef.current =
+            typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
           balanceRef.current = data.balance;
           setBalance(data.balance);
-          localStorage.setItem('aloye_wingo_balance', String(data.balance));
         }
         if (Array.isArray(data.transactions)) {
           setTransactions(data.transactions);
@@ -702,16 +689,16 @@ export default function App() {
       fetch('/api/auth/sync-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: initialUser, localBalance: balanceRef.current }),
+        body: JSON.stringify({ user: initialUser }),
       })
         .then(async (r) => {
           const body = await r.json().catch(() => null);
-          if (r.status === 410 || body?.deleted) {
+          if (r.status === 410 || r.status === 403 || body?.deleted || body?.blocked) {
             deletedUserIdsRef.current.add(initialUser.id);
             const cp = normalizePhoneKey(initialUser.phone);
             if (cp) deletedPhonesRef.current.add(cp);
             persistDeletedTombstones();
-            purgeUsersFromLocalStorage(new Set([initialUser.id]), cp ? new Set([cp]) : undefined);
+            purgeActiveSession(new Set([initialUser.id]), cp ? new Set([cp]) : undefined);
             return null;
           }
           return r.ok ? body : null;
@@ -719,7 +706,10 @@ export default function App() {
         .then((data) => {
           if (!data) return;
           if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
+          if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
           if (typeof data.balance === 'number') {
+            lastServerBalanceUpdatedAtRef.current =
+              typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
             balanceRef.current = data.balance;
             setBalance(data.balance);
           }
@@ -753,6 +743,7 @@ export default function App() {
       try {
         const data = JSON.parse((ev as MessageEvent).data);
         if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
+        if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
       } catch {
         // ignore
       }
@@ -782,6 +773,7 @@ export default function App() {
         const data = JSON.parse((ev as MessageEvent).data) as {
           userId?: string;
           balance?: number;
+          balanceUpdatedAt?: number;
         };
         if (
           data.userId &&
@@ -790,9 +782,34 @@ export default function App() {
           betInFlightRef.current === 0
         ) {
           playerSyncSeqRef.current += 1;
+          lastServerBalanceUpdatedAtRef.current =
+            typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
           balanceRef.current = data.balance;
           setBalance(data.balance);
-          localStorage.setItem('aloye_wingo_balance', String(data.balance));
+        }
+      } catch {
+        // ignore
+      }
+    });
+
+    es.addEventListener('user_deleted', (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data) as {
+          userId?: string;
+          phone?: string;
+        };
+        const active = currentUserRef.current;
+        if (
+          active &&
+          (data.userId === active.id ||
+            (data.phone && normalizePhoneKey(data.phone) === normalizePhoneKey(active.phone)))
+        ) {
+          deletedUserIdsRef.current.add(active.id);
+          const cp = normalizePhoneKey(active.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
+          persistDeletedTombstones();
+          purgeActiveSession(new Set([active.id]), cp ? new Set([cp]) : undefined);
+          showToast('Your account was removed and blocked by Admin.');
         }
       } catch {
         // ignore
@@ -813,6 +830,7 @@ export default function App() {
           mode: GameTimeOption;
           period: string;
           result: DrawResult;
+          commitHashes?: Partial<Record<GameTimeOption, string>>;
           forcedNumbers?: Record<GameTimeOption, number | null>;
           forcedOutcomes?: Record<GameTimeOption, ForcedOutcomeSpec | null>;
           settledByUser?: Record<
@@ -829,6 +847,7 @@ export default function App() {
         };
 
         if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
+        if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
         applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
 
         if (data.result && data.mode) {
@@ -853,10 +872,10 @@ export default function App() {
         ) {
           settledPeriodsRef.current.add(settledKey);
           playerSyncSeqRef.current += 1;
+          lastServerBalanceUpdatedAtRef.current = Date.now();
           const settled = data.settledByUser[activeUser.id];
           balanceRef.current = settled.newBalance;
           setBalance(settled.newBalance);
-          localStorage.setItem('aloye_wingo_balance', String(settled.newBalance));
 
           const settledMap = new Map(settled.bets.map((b) => [b.id, b]));
           const nextBets = userBetsRef.current.map((b) => settledMap.get(b.id) || b);
@@ -957,12 +976,15 @@ export default function App() {
     const unsub = subscribePlayerFirestoreState(
       firebaseUser.uid,
       {
-        onUserUpdate: ({ balance: cloudBalance, referralEarnings: cloudRef }) => {
+        onUserUpdate: ({ balance: cloudBalance, referralEarnings: cloudRef, updatedAt: cloudUpdatedAt }) => {
           if (betInFlightRef.current === 0) {
-            if (typeof cloudBalance === 'number' && cloudBalance > balanceRef.current) {
+            if (
+              typeof cloudBalance === 'number' &&
+              cloudBalance !== balanceRef.current &&
+              (!cloudUpdatedAt || cloudUpdatedAt >= lastServerBalanceUpdatedAtRef.current)
+            ) {
               balanceRef.current = cloudBalance;
               setBalance(cloudBalance);
-              localStorage.setItem('aloye_wingo_balance', String(cloudBalance));
             }
             if (typeof cloudRef === 'number') {
               setReferralEarnings(cloudRef);
@@ -982,8 +1004,10 @@ export default function App() {
         onUserDeleted: () => {
           const uid = firebaseUser.uid;
           deletedUserIdsRef.current.add(uid);
+          const cp = normalizePhoneKey(currentUserRef.current?.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
           persistDeletedTombstones();
-          purgeUsersFromLocalStorage(new Set([uid]));
+          purgeActiveSession(new Set([uid]), cp ? new Set([cp]) : undefined);
         },
       },
       (err) => {
@@ -1028,7 +1052,7 @@ export default function App() {
               serverAdminUsersRef.current = serverAdminUsersRef.current.filter(
                 (u) => !removedIds.has(u.id)
               );
-              purgeUsersFromLocalStorage(removedIds);
+              purgeActiveSession(removedIds);
             }
           }
 
@@ -1062,7 +1086,17 @@ export default function App() {
       }
     );
 
-    return () => unsub();
+    const unsubBlocked = subscribeBlockedPhonesFromFirestore((cloudBlocked) => {
+      setBlockedPhones((prev) => {
+        const merged = new Set([...prev, ...cloudBlocked]);
+        return Array.from(merged);
+      });
+    });
+
+    return () => {
+      unsub();
+      unsubBlocked();
+    };
   }, [firebaseAuthReady, firebaseUser, isAdminAuthenticated]);
 
   const [latestRoundSummary, setLatestRoundSummary] = useState<{
@@ -1158,6 +1192,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
+          if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
           if (data.forcedOutcomes || data.forcedNumbers) {
             applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
           }
@@ -1185,7 +1220,7 @@ export default function App() {
       if (syncedMatch) {
         completedResult = syncedMatch;
       } else {
-        // Pure offline emergency fallback only if server completely unreachable
+        // Pure uniform fair fallback if server completely unreachable
         const forcedNum = forcedNumbersRef.current[mode];
         if (forcedNum !== null && forcedNum !== undefined && forcedNum >= 0 && forcedNum <= 9) {
           completedResult = {
@@ -1196,12 +1231,7 @@ export default function App() {
             timestamp: Date.now()
           };
         } else {
-          completedResult = generateStrategicDrawResult(
-            finishedPeriod,
-            userBetsRef.current,
-            historyByModeRef.current[mode] || [],
-            Date.now()
-          );
+          completedResult = generateSingleDrawResult(finishedPeriod, Date.now());
         }
       }
     }
@@ -1227,9 +1257,9 @@ export default function App() {
     if (settledPeriodsRef.current.has(settledKey)) {
       if (typeof serverBalance === 'number' && betInFlightRef.current === 0) {
         playerSyncSeqRef.current += 1;
+        lastServerBalanceUpdatedAtRef.current = Date.now();
         balanceRef.current = serverBalance;
         setBalance(serverBalance);
-        localStorage.setItem('aloye_wingo_balance', String(serverBalance));
       }
       if (Array.isArray(serverBets)) {
         userBetsRef.current = serverBets;
@@ -1260,9 +1290,9 @@ export default function App() {
       setUserBets(serverBets);
 
       if (typeof serverBalance === 'number') {
+        lastServerBalanceUpdatedAtRef.current = Date.now();
         balanceRef.current = serverBalance;
         setBalance(serverBalance);
-        localStorage.setItem('aloye_wingo_balance', String(serverBalance));
       }
 
       const fbUser = firebaseUserRef.current;
@@ -1328,7 +1358,6 @@ export default function App() {
         const nextBalance = Math.round((balanceRef.current + roundTotalReturn) * 100) / 100;
         balanceRef.current = nextBalance;
         setBalance(nextBalance);
-        localStorage.setItem('aloye_wingo_balance', String(nextBalance));
       }
 
       setLatestRoundSummary({
@@ -1390,13 +1419,12 @@ export default function App() {
       return;
     }
 
-    // Deduct balance immediately & synchronously and lock against stale background GET overwrites
+    // Deduct balance optimistically while server confirms atomic bet
     playerSyncSeqRef.current += 1;
     const preBetBalance = balanceRef.current;
     const nextBalance = Math.max(0, Math.round((preBetBalance - totalAmount) * 100) / 100);
     balanceRef.current = nextBalance;
     setBalance(nextBalance);
-    localStorage.setItem('aloye_wingo_balance', String(nextBalance));
 
     const activePeriodNow = getPeriodForMode(gameTime, getServerNow());
     const tempBet: UserBet = {
@@ -1414,6 +1442,7 @@ export default function App() {
       totalAmount,
       status: 'pending',
       winAmount: 0,
+      roundHash: commitHashes[gameTime],
       timestamp: Date.now()
     };
 
@@ -1445,32 +1474,25 @@ export default function App() {
             }),
           });
 
-        let res = await postBet();
-        // If server restarted and lost user in memory/DB, resync user session automatically & retry bet!
-        if (res.status === 404) {
-          const syncRes = await fetch('/api/auth/sync-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user: currentUser, localBalance: preBetBalance }),
-          });
-          if (syncRes.status === 410) {
-            deletedUserIdsRef.current.add(currentUser.id);
-            persistDeletedTombstones();
-            purgeUsersFromLocalStorage(new Set([currentUser.id]));
-            return;
-          }
-          if (syncRes.ok) {
-            res = await postBet();
-          }
+        const res = await postBet();
+        if (res.status === 403 || res.status === 410 || res.status === 404) {
+          deletedUserIdsRef.current.add(currentUser.id);
+          const cp = normalizePhoneKey(currentUser.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
+          persistDeletedTombstones();
+          purgeActiveSession(new Set([currentUser.id]), cp ? new Set([cp]) : undefined);
+          showToast('Account removed or blocked by Admin.');
+          return;
         }
 
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
           if (typeof data.balance === 'number') {
+            lastServerBalanceUpdatedAtRef.current =
+              typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
             balanceRef.current = data.balance;
             setBalance(data.balance);
-            localStorage.setItem('aloye_wingo_balance', String(data.balance));
           }
           if (data.bet) {
             const replaced = userBetsRef.current.map((b) =>
@@ -1491,9 +1513,9 @@ export default function App() {
           const errData = await res.json().catch(() => ({}));
           if (typeof errData.balance === 'number') {
             playerSyncSeqRef.current += 1;
+            lastServerBalanceUpdatedAtRef.current = Date.now();
             balanceRef.current = errData.balance;
             setBalance(errData.balance);
-            localStorage.setItem('aloye_wingo_balance', String(errData.balance));
             const reverted = userBetsRef.current.filter((b) => b.id !== tempBet.id);
             userBetsRef.current = reverted;
             setUserBets(reverted);
@@ -1505,35 +1527,6 @@ export default function App() {
       } finally {
         betInFlightRef.current = Math.max(0, betInFlightRef.current - 1);
       }
-    }
-  };
-
-  // Helper: Credit 7% Referral Commission locally (server handles cross-device crediting automatically)
-  const creditReferrerCommission = (depositAmount: number) => {
-    if (!currentUser?.inviteCode || depositAmount <= 0) return;
-    const code = currentUser.inviteCode.trim().toUpperCase();
-    const commission = Math.round(depositAmount * 0.07);
-    if (!code || commission <= 0) return;
-
-    try {
-      const usersRaw = localStorage.getItem('muna_registered_users');
-      const users: RegisteredUser[] = usersRaw ? JSON.parse(usersRaw) : [];
-      const inviter = users.find(
-        (u) => u.id !== currentUser.id && (u.id.toUpperCase() === code || u.phone === code)
-      );
-      if (!inviter) return;
-
-      const balRaw = localStorage.getItem('muna_user_balances');
-      const balMap: Record<string, number> = balRaw ? JSON.parse(balRaw) : {};
-      balMap[inviter.id] = (typeof balMap[inviter.id] === 'number' ? balMap[inviter.id] : 0) + commission;
-      localStorage.setItem('muna_user_balances', JSON.stringify(balMap));
-
-      const refRaw = localStorage.getItem('muna_referral_earnings');
-      const refMap: Record<string, number> = refRaw ? JSON.parse(refRaw) : {};
-      refMap[inviter.id] = (typeof refMap[inviter.id] === 'number' ? refMap[inviter.id] : 0) + commission;
-      localStorage.setItem('muna_referral_earnings', JSON.stringify(refMap));
-    } catch {
-      // ignore storage errors
     }
   };
 
@@ -1553,49 +1546,40 @@ export default function App() {
 
     if (currentUser) {
       try {
-        const submitDeposit = () =>
-          fetch('/api/transactions/deposit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: currentUser.id,
-              userPhone: currentUser.phone,
-              amount: enrichedTx.amount,
-              bonusAmount: enrichedTx.bonusAmount || 0,
-              method: enrichedTx.method,
-              accountNumber: enrichedTx.accountNumber,
-              trxId: enrichedTx.trxId,
-              screenshotUrl: enrichedTx.screenshotUrl,
-              note: enrichedTx.note,
-              autoCredit: autoCredited,
-            }),
-          });
+        const res = await fetch('/api/transactions/deposit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser.id,
+            userPhone: currentUser.phone,
+            amount: enrichedTx.amount,
+            bonusAmount: enrichedTx.bonusAmount || 0,
+            method: enrichedTx.method,
+            accountNumber: enrichedTx.accountNumber,
+            trxId: enrichedTx.trxId,
+            screenshotUrl: enrichedTx.screenshotUrl,
+            note: enrichedTx.note,
+            autoCredit: autoCredited,
+          }),
+        });
 
-        let res = await submitDeposit();
-        if (res.status === 404) {
-          const syncRes = await fetch('/api/auth/sync-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user: currentUser, localBalance: balanceRef.current }),
-          });
-          if (syncRes.status === 410) {
-            deletedUserIdsRef.current.add(currentUser.id);
-            persistDeletedTombstones();
-            purgeUsersFromLocalStorage(new Set([currentUser.id]));
-            return;
-          }
-          if (syncRes.ok) {
-            res = await submitDeposit();
-          }
+        if (res.status === 403 || res.status === 404) {
+          deletedUserIdsRef.current.add(currentUser.id);
+          const cp = normalizePhoneKey(currentUser.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
+          persistDeletedTombstones();
+          purgeActiveSession(new Set([currentUser.id]), cp ? new Set([cp]) : undefined);
+          return;
         }
 
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
           if (typeof data.balance === 'number') {
+            lastServerBalanceUpdatedAtRef.current =
+              typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
             balanceRef.current = data.balance;
             setBalance(data.balance);
-            localStorage.setItem('aloye_wingo_balance', String(data.balance));
           }
           if (data.tx) {
             setTransactions((prev) =>
@@ -1604,6 +1588,9 @@ export default function App() {
             const fbUser = firebaseUserRef.current;
             if (fbUser?.emailVerified && (fbUser.uid === currentUser.id || isVerifiedGoogleAdmin(fbUser))) {
               void createTransactionInFirestore(data.tx, data.tx.userId || currentUser.id).catch(() => {});
+              if (typeof data.balance === 'number' && fbUser.uid === currentUser.id) {
+                void syncPlayerBalanceToFirestore(fbUser.uid, data.balance).catch(() => {});
+              }
             }
           }
           if (isAdminAuthRef.current) {
@@ -1627,21 +1614,8 @@ export default function App() {
           return;
         }
       } catch {
-        // offline fallback below
+        // network glitch
       }
-    }
-
-    if (autoCredited) {
-      const nextBal = Math.round((balanceRef.current + amount) * 100) / 100;
-      balanceRef.current = nextBal;
-      setBalance(nextBal);
-      setTransactions((prev) => [enrichedTx, ...prev]);
-      creditReferrerCommission(enrichedTx.amount);
-    } else {
-      setTransactions((prev) => [enrichedTx, ...prev]);
-    }
-    if (isAdminAuthRef.current) {
-      syncLocalRecordsToAdminServer(adminPinRef.current || '786');
     }
   };
 
@@ -1679,7 +1653,6 @@ export default function App() {
       setTransactions((prev) =>
         prev.map((t) => (t.id === txId ? { ...t, status: 'completed' as const } : t))
       );
-      creditReferrerCommission(tx.amount);
     }
   };
 
@@ -1726,45 +1699,36 @@ export default function App() {
 
     if (currentUser) {
       try {
-        const submitWithdraw = () =>
-          fetch('/api/transactions/withdraw', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: currentUser.id,
-              userPhone: currentUser.phone,
-              amount,
-              method: tx.method,
-              accountNumber: tx.accountNumber,
-              accountTitle: tx.accountTitle,
-            }),
-          });
+        const res = await fetch('/api/transactions/withdraw', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser.id,
+            userPhone: currentUser.phone,
+            amount,
+            method: tx.method,
+            accountNumber: tx.accountNumber,
+            accountTitle: tx.accountTitle,
+          }),
+        });
 
-        let res = await submitWithdraw();
-        if (res.status === 404) {
-          const syncRes = await fetch('/api/auth/sync-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user: currentUser, localBalance: preWithdrawBalance }),
-          });
-          if (syncRes.status === 410) {
-            deletedUserIdsRef.current.add(currentUser.id);
-            persistDeletedTombstones();
-            purgeUsersFromLocalStorage(new Set([currentUser.id]));
-            return;
-          }
-          if (syncRes.ok) {
-            res = await submitWithdraw();
-          }
+        if (res.status === 403 || res.status === 404) {
+          deletedUserIdsRef.current.add(currentUser.id);
+          const cp = normalizePhoneKey(currentUser.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
+          persistDeletedTombstones();
+          purgeActiveSession(new Set([currentUser.id]), cp ? new Set([cp]) : undefined);
+          return;
         }
 
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
           if (typeof data.balance === 'number') {
+            lastServerBalanceUpdatedAtRef.current =
+              typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
             balanceRef.current = data.balance;
             setBalance(data.balance);
-            localStorage.setItem('aloye_wingo_balance', String(data.balance));
           }
           if (data.tx) {
             setTransactions((prev) =>
@@ -1788,7 +1752,6 @@ export default function App() {
           if (typeof errData.balance === 'number') {
             balanceRef.current = errData.balance;
             setBalance(errData.balance);
-            localStorage.setItem('aloye_wingo_balance', String(errData.balance));
           } else {
             balanceRef.current = preWithdrawBalance;
             setBalance(preWithdrawBalance);
@@ -1801,15 +1764,11 @@ export default function App() {
           return;
         }
       } catch {
-        // offline fallback below
+        balanceRef.current = preWithdrawBalance;
+        setBalance(preWithdrawBalance);
+        showToast('Could not connect to server. Please try again.');
       }
     }
-
-    setTransactions((prev) => [enrichedTx, ...prev]);
-    if (isAdminAuthRef.current) {
-      syncLocalRecordsToAdminServer(adminPinRef.current || '786');
-    }
-    showToast(`Rs ${amount.toLocaleString()} withdrawal submitted for processing`);
   };
 
   // Admin Approval for Withdraw
@@ -2086,6 +2045,10 @@ export default function App() {
           void adminUpsertUserToFirestore(data.user).catch(() => {});
         }
         if (currentUserRef.current?.id === userId && data.user) {
+          lastServerBalanceUpdatedAtRef.current =
+            typeof data.user.balanceUpdatedAt === 'number'
+              ? data.user.balanceUpdatedAt
+              : Date.now();
           balanceRef.current = data.user.balance;
           setBalance(data.user.balance);
         }
@@ -2110,7 +2073,7 @@ export default function App() {
     serverAdminUsersRef.current = serverAdminUsersRef.current.filter((u) => u.id !== userId);
     firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter((u) => u.id !== userId);
     recomputeMergedAdminUsers();
-    purgeUsersFromLocalStorage(new Set([userId]), phoneKey ? new Set([phoneKey]) : undefined);
+    purgeActiveSession(new Set([userId]), phoneKey ? new Set([phoneKey]) : undefined);
 
     try {
       const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
@@ -2118,7 +2081,11 @@ export default function App() {
         headers: { 'x-admin-pin': adminPinRef.current },
       });
       if (res.ok) {
-        applyAdminSnapshot(await res.json());
+        const data = await res.json();
+        applyAdminSnapshot(data);
+        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && data.blockedPhone) {
+          void blockPhoneInFirestore(data.blockedPhone).catch(() => {});
+        }
       }
     } catch {
       // ignore
@@ -2126,6 +2093,33 @@ export default function App() {
 
     if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
       await adminDeleteUserInFirestore(userId).catch(() => {});
+      if (phoneKey) {
+        await blockPhoneInFirestore(phoneKey).catch(() => {});
+      }
+    }
+  };
+
+  const handleUnblockPhoneOnServer = async (phone: string) => {
+    const cp = normalizePhoneKey(phone);
+    if (cp) {
+      deletedPhonesRef.current.delete(cp);
+      persistDeletedTombstones();
+    }
+    setBlockedPhones((prev) => prev.filter((p) => normalizePhoneKey(p) !== cp));
+    try {
+      const res = await fetch('/api/admin/unblock-phone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: adminPinRef.current, phone }),
+      });
+      if (res.ok) {
+        applyAdminSnapshot(await res.json());
+      }
+    } catch {
+      // ignore
+    }
+    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
+      await unblockPhoneInFirestore(phone).catch(() => {});
     }
   };
 
@@ -2310,12 +2304,19 @@ export default function App() {
               if (typeof serverPayload.serverTime === 'number') {
                 setServerTimeOffset(serverPayload.serverTime);
               }
+              if (serverPayload.commitHashes) {
+                setCommitHashes((prev) => ({ ...prev, ...serverPayload.commitHashes }));
+              }
               const bal =
                 typeof serverPayload.balance === 'number'
                   ? serverPayload.balance
                   : isNewSignup
                   ? 10
                   : 0;
+              lastServerBalanceUpdatedAtRef.current =
+                typeof serverPayload.balanceUpdatedAt === 'number'
+                  ? serverPayload.balanceUpdatedAt
+                  : Date.now();
               balanceRef.current = bal;
               setBalance(bal);
               if (Array.isArray(serverPayload.transactions)) {
@@ -2448,6 +2449,7 @@ export default function App() {
                 lastPeriodPerModeRef.current[time] = per;
                 lastPlayedSecondRef.current = rem <= 5 ? rem : -1;
               }}
+              commitHash={commitHashes[gameTime]}
               language={language}
               theme={theme}
             />
@@ -2490,6 +2492,7 @@ export default function App() {
             userBalance={balance}
             initialMultiplier={selectedMultiplier}
             isLocked={secondsRemaining <= 5}
+            commitHash={commitHashes[gameTime]}
             onConfirmBet={handleConfirmBet}
             onOpenDeposit={() => {
               setIsBetModalOpen(false);
@@ -2554,7 +2557,7 @@ export default function App() {
             onClose={() => setIsInviteOpen(false)}
             language={language}
             theme={theme}
-            referralCode={currentUser.id}
+            referralCode={currentUser.phone || currentUser.id}
             earnedCommission={referralEarnings}
             invitedCount={invitedCount}
           />
@@ -2671,6 +2674,7 @@ export default function App() {
         }}
         activeMode={gameTime}
         adminUsers={adminUsers}
+        blockedPhones={blockedPhones}
         adminSummary={adminSummary}
         lastSyncedAt={lastAdminSyncedAt}
         onRefreshAdmin={async () => {
@@ -2689,6 +2693,7 @@ export default function App() {
         }}
         onUpdateUserBalance={handleUpdateUserBalanceOnServer}
         onDeleteUser={handleDeleteUserOnServer}
+        onUnblockPhone={handleUnblockPhoneOnServer}
         onPinVerified={(pin, snapshot) => {
           setAdminPin(pin);
           adminPinRef.current = pin;

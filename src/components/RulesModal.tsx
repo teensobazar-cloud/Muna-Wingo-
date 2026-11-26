@@ -73,24 +73,24 @@ export const RulesModal: React.FC<RulesModalProps> = ({
 
               {/* Color Rules */}
               <div className="space-y-2">
-                <h4 className="font-bold text-slate-900 text-sm">1. رنگوں کے انعامات (Color Rules):</h4>
+                <h4 className="font-bold text-slate-900 text-sm">1. رنگوں کے انعامات (92% Fair RTP):</h4>
                 <div className="space-y-1.5 pl-2">
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#18b660] shrink-0 mt-0.5" />
                     <div>
-                      <strong>سبز (Green):</strong> اگر 1, 3, 7, 9 آئے تو رقم دگنی (2X) ملے گی۔ اگر 5 آئے تو (1.5X) ملے گی۔
+                      <strong>سبز (Green):</strong> اگر 1, 3, 7, 9 آئے تو 1.95X ملے گی۔ اگر 5 آئے تو (1.40X) ملے گی۔
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#ea384c] shrink-0 mt-0.5" />
                     <div>
-                      <strong>سرخ (Red):</strong> اگر 2, 4, 6, 8 آئے تو رقم دگنی (2X) ملے گی۔ اگر 0 آئے تو (1.5X) ملے گی۔
+                      <strong>سرخ (Red):</strong> اگر 2, 4, 6, 8 آئے تو 1.95X ملے گی۔ اگر 0 آئے تو (1.40X) ملے گی۔
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#9c27b0] shrink-0 mt-0.5" />
                     <div>
-                      <strong>جامنی (Violet):</strong> اگر 0 یا 5 آئے تو ساڑھے چار گنا (4.5X) بھاری انعام ملے گا!
+                      <strong>جامنی (Violet):</strong> اگر 0 یا 5 آئے تو 4.6X بھاری انعام ملے گا!
                     </div>
                   </div>
                 </div>
@@ -100,7 +100,7 @@ export const RulesModal: React.FC<RulesModalProps> = ({
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900 text-sm">2. مخصوص نمبرز (Numbers 0-9):</h4>
                 <p className="pl-2">
-                  اگر آپ کسی بھی ایک نمبر (0 سے 9) پر بیٹ لگاتے ہیں اور وہی نمبر نکل آتا ہے تو آپ کو رقم کا <strong>9 گنا (9X)</strong> منافع ملتا ہے!
+                  اگر آپ کسی بھی ایک نمبر (0 سے 9) پر بیٹ لگاتے ہیں اور وہی نمبر نکل آتا ہے تو آپ کو رقم کا <strong>9.2 گنا (9.2X)</strong> منافع ملتا ہے!
                 </p>
               </div>
 
@@ -108,8 +108,8 @@ export const RulesModal: React.FC<RulesModalProps> = ({
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900 text-sm">3. بڑا اور چھوٹا (Big & Small):</h4>
                 <ul className="list-disc pl-5 space-y-1">
-                  <li><strong>بڑا (Big):</strong> نمبر 5, 6, 7, 8, 9 (منافع: 2X)</li>
-                  <li><strong>چھوٹا (Small):</strong> نمبر 0, 1, 2, 3, 4 (منافع: 2X)</li>
+                  <li><strong>بڑا (Big):</strong> نمبر 5, 6, 7, 8, 9 (منافع: 1.84X)</li>
+                  <li><strong>چھوٹا (Small):</strong> نمبر 0, 1, 2, 3, 4 (منافع: 1.84X)</li>
                 </ul>
               </div>
 
@@ -117,13 +117,13 @@ export const RulesModal: React.FC<RulesModalProps> = ({
               <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-200 text-emerald-950 space-y-1.5">
                 <div className="flex items-center gap-1.5 font-bold">
                   <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>ڈپازٹ، وڈرا اور بونس کے اصول:</span>
+                  <span>ڈپازٹ، وڈرا اور فیئر SHA-256 اصول:</span>
                 </div>
                 <p>
                   • نیا اکاؤنٹ بنانے پر <strong>10 روپے</strong> سائن اپ بونس ملتا ہے۔<br />
-                  • ڈپازٹ کم از کم <strong>50 روپے</strong> ہے (سکرین شاٹ + TRX ID سے آٹو تصدیق)۔<br />
-                  • <strong>500 یا اس سے زیادہ ڈپازٹ پر 20% بونس</strong> ملتا ہے (500 پہ +100، 1,000 پہ +200، اسی تناسب سے بڑھتا جائے گا)۔<br />
-                  • دوستوں کو انوائٹ کرنے پر ان کے ڈپازٹ کا <strong>7% ریفرل کمیشن</strong> ملتا ہے۔<br />
+                  • ہر راؤنڈ کا نتیجہ بیٹ بند ہونے سے پہلے SHA-256 ہیش میں محفوظ ہوتا ہے (92% Fair RTP)۔<br />
+                  • <strong>500 یا اس سے زیادہ ڈپازٹ پر 20% بونس</strong> ملتا ہے۔<br />
+                  • دوستوں کو انوائٹ کرنے پر ان کے سائن اپ پہ <strong>Rs 10 فوری بونس</strong> اور ڈپازٹ کا <strong>7% کمیشن</strong> ملتا ہے۔<br />
                   • وڈرا کم از کم <strong>500 روپے</strong> ہے جو ایڈمن پینل سے منظوری کے بعد منتقل ہوتا ہے۔
                 </p>
               </div>
@@ -138,31 +138,31 @@ export const RulesModal: React.FC<RulesModalProps> = ({
                     : 'bg-emerald-50 border-emerald-200 text-emerald-950'
                 }`}
               >
-                <h4 className="font-bold text-sm mb-1">What is Muna WinGo 1-Minute?</h4>
+                <h4 className="font-bold text-sm mb-1">What is Muna WinGo? (92% Fair RTP)</h4>
                 <p>
-                  Every minute, a random winning number (0-9) and corresponding colors are drawn. Betting closes during the last 5 seconds of the countdown.
+                  Each round draws a uniform provably-fair number (0–9) pre-committed as a SHA-256 hash before betting closes (average ~4–5 wins out of 10 color/Big-Small bets). Betting locks during the final 5 seconds.
                 </p>
               </div>
 
               <div className="space-y-2">
-                <h4 className="font-bold text-slate-900 text-sm">1. Color Payout Rules:</h4>
+                <h4 className="font-bold text-slate-900 text-sm">1. Color Payout Rules (92% Fair RTP):</h4>
                 <div className="space-y-1.5 pl-2">
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#18b660] shrink-0 mt-0.5" />
                     <div>
-                      <strong>Green:</strong> If 1, 3, 7, 9 appears $\to$ 2X payout. If 5 appears $\to$ 1.5X payout.
+                      <strong>Green:</strong> If 1, 3, 7, 9 appears → <strong>1.95X</strong> payout. If 5 appears → <strong>1.40X</strong> payout.
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#ea384c] shrink-0 mt-0.5" />
                     <div>
-                      <strong>Red:</strong> If 2, 4, 6, 8 appears $\to$ 2X payout. If 0 appears $\to$ 1.5X payout.
+                      <strong>Red:</strong> If 2, 4, 6, 8 appears → <strong>1.95X</strong> payout. If 0 appears → <strong>1.40X</strong> payout.
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
                     <span className="w-3 h-3 rounded-full bg-[#9c27b0] shrink-0 mt-0.5" />
                     <div>
-                      <strong>Violet:</strong> If 0 or 5 appears $\to$ 4.5X mega multiplier!
+                      <strong>Violet:</strong> If 0 or 5 appears → <strong>4.6X</strong> multiplier!
                     </div>
                   </div>
                 </div>
@@ -171,28 +171,28 @@ export const RulesModal: React.FC<RulesModalProps> = ({
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900 text-sm">2. Number Predictions (0-9):</h4>
                 <p className="pl-2">
-                  If the winning number matches your exact choice, receive a huge <strong>9X payout</strong>.
+                  If the winning number matches your exact choice, receive a huge <strong>9.2X payout</strong>.
                 </p>
               </div>
 
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900 text-sm">3. Big & Small:</h4>
                 <ul className="list-disc pl-5 space-y-1">
-                  <li><strong>Big:</strong> Numbers 5, 6, 7, 8, 9 (2X payout)</li>
-                  <li><strong>Small:</strong> Numbers 0, 1, 2, 3, 4 (2X payout)</li>
+                  <li><strong>Big:</strong> Numbers 5, 6, 7, 8, 9 (<strong>1.84X payout</strong>)</li>
+                  <li><strong>Small:</strong> Numbers 0, 1, 2, 3, 4 (<strong>1.84X payout</strong>)</li>
                 </ul>
               </div>
 
               <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-200 text-emerald-950 space-y-1.5">
                 <div className="flex items-center gap-1.5 font-bold">
                   <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>Deposits, Withdrawals &amp; Bonuses:</span>
+                  <span>Provably Fair SHA-256, Deposits &amp; Bonuses:</span>
                 </div>
                 <p>
+                  • Every round outcome is pre-committed in SHA-256 before betting closes and revealed on settlement.<br />
                   • Rs 10 Sign-Up Bonus on new accounts.<br />
-                  • Min deposit: Rs 50 (auto-credited with screenshot + TRX ID).<br />
-                  • <strong>20% Deposit Bonus</strong> on Rs 500+ deposits (Rs 500 → +100, Rs 1,000 → +200).<br />
-                  • <strong>7% Referral Commission</strong> on invited friends&apos; deposits.<br />
+                  • Min deposit: Rs 50 • <strong>20% Bonus</strong> on Rs 500+ deposits.<br />
+                  • <strong>Rs 10 Invite Bonus</strong> per friend signup + <strong>7% Referral Commission</strong> on friend deposits.<br />
                   • Min withdrawal: Rs 500 (approved via Admin Panel).
                 </p>
               </div>

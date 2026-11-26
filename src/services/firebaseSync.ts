@@ -288,6 +288,58 @@ export async function adminDeleteUserInFirestore(uid: string): Promise<void> {
   }
 }
 
+export async function blockPhoneInFirestore(phone: string): Promise<void> {
+  if (!isVerifiedGoogleAdmin(auth.currentUser) || !auth.currentUser) return;
+  const clean = normalizePhoneForSchema(phone, '');
+  if (!clean || clean.length < 7) return;
+  const phoneId = sanitizeFirestoreId(clean, 'PH');
+  const path = `blocked_phones/${phoneId}`;
+  try {
+    await setDoc(doc(db, 'blocked_phones', phoneId), {
+      phoneId,
+      phone: clean,
+      blockedByUid: sanitizeFirestoreId(auth.currentUser.uid, 'ADM'),
+      blockedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function unblockPhoneInFirestore(phone: string): Promise<void> {
+  if (!isVerifiedGoogleAdmin(auth.currentUser)) return;
+  const clean = normalizePhoneForSchema(phone, '');
+  if (!clean) return;
+  const phoneId = sanitizeFirestoreId(clean, 'PH');
+  try {
+    await deleteDoc(doc(db, 'blocked_phones', phoneId)).catch(() => {});
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `blocked_phones/${phoneId}`);
+  }
+}
+
+export function subscribeBlockedPhonesFromFirestore(
+  onUpdate: (phones: string[]) => void,
+  onError?: (err: Error) => void
+): () => void {
+  return onSnapshot(
+    query(collection(db, 'blocked_phones'), limit(250)),
+    (snap) => {
+      const phones = snap.docs
+        .map((d) => String(d.data().phone || ''))
+        .filter((p) => p.length >= 7);
+      onUpdate(phones);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'blocked_phones');
+      } catch (e) {
+        onError?.(e as Error);
+      }
+    }
+  );
+}
+
 export async function createTransactionInFirestore(
   tx: PaymentTransaction,
   ownerUid: string
@@ -418,6 +470,10 @@ export async function createBetInFirestore(bet: UserBet, ownerUid: string): Prom
     updatedAt: serverTimestamp(),
   };
 
+  if (bet.roundHash) {
+    payload.roundHash = clampString(bet.roundHash, 128);
+  }
+
   try {
     await setDoc(doc(db, 'bets', safeBetId), payload);
   } catch (error) {
@@ -510,14 +566,21 @@ export async function adminSyncDrawRecordToFirestore(
     if (!drawSnap.exists()) {
       const colors = draw.colors?.length ? draw.colors : getColorsForNumber(draw.number);
       const primaryColor = colors.includes('green') ? 'green' : 'red';
-      await setDoc(drawRef, {
+      const drawPayload: Record<string, unknown> = {
         period: safePeriod.length >= 6 ? safePeriod : safePeriod.padEnd(6, '0'),
         number: Math.min(9, Math.max(0, Math.round(draw.number))),
         bigSmall: draw.bigSmall || getBigSmallForNumber(draw.number),
         primaryColor,
         hasViolet: colors.includes('violet'),
         createdAt: serverTimestamp(),
-      });
+      };
+      if (draw.commitHash) {
+        drawPayload.commitHash = clampString(draw.commitHash, 128);
+      }
+      if (draw.serverSeed) {
+        drawPayload.serverSeed = clampString(draw.serverSeed, 128);
+      }
+      await setDoc(drawRef, drawPayload);
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, drawPath);
@@ -527,7 +590,12 @@ export async function adminSyncDrawRecordToFirestore(
 export function subscribePlayerFirestoreState(
   uid: string,
   callbacks: {
-    onUserUpdate?: (data: { balance: number; referralEarnings: number; fullName?: string }) => void;
+    onUserUpdate?: (data: {
+      balance: number;
+      referralEarnings: number;
+      fullName?: string;
+      updatedAt: number;
+    }) => void;
     onTransactionsUpdate?: (txs: PaymentTransaction[]) => void;
     onBetsUpdate?: (bets: UserBet[]) => void;
     onUserDeleted?: () => void;
@@ -552,6 +620,7 @@ export function subscribePlayerFirestoreState(
         balance: clampNumber(d.balance, 0, 100000000, 0),
         referralEarnings: clampNumber(d.referralEarnings, 0, 100000000, 0),
         fullName: typeof d.fullName === 'string' ? d.fullName : undefined,
+        updatedAt: tsToMillis(d.updatedAt, 0),
       });
     },
     (error) => {
@@ -630,6 +699,7 @@ export function subscribePlayerFirestoreState(
             status: (v.status || 'pending') as UserBet['status'],
             winAmount: Number(v.winAmount || 0),
             profit: typeof v.profit === 'number' ? v.profit : undefined,
+            roundHash: typeof v.roundHash === 'string' ? v.roundHash : undefined,
             timestamp: tsToMillis(v.createdAt),
           };
         })
@@ -757,6 +827,7 @@ export function subscribeAdminFirestoreState(
             status: (v.status || 'pending') as UserBet['status'],
             winAmount: Number(v.winAmount || 0),
             profit: typeof v.profit === 'number' ? v.profit : undefined,
+            roundHash: typeof v.roundHash === 'string' ? v.roundHash : undefined,
             timestamp: tsToMillis(v.createdAt),
           };
         })

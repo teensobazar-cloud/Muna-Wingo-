@@ -12,17 +12,14 @@ export function getBigSmallForNumber(num: number): BigSmallType {
 }
 
 /**
- * Tiered 2X payout curve (Return = Stake + Profit):
- * - Stake < 50:      1.90x (e.g. Rs 10 -> Rs 19 [+9 profit], Rs 20 -> Rs 38 [+18 profit])
- * - Stake 50..499:   1.92x (e.g. Rs 50 -> Rs 96 [+46 profit])
- * - Stake 500..999:  1.94x (e.g. Rs 500 -> Rs 970 [+470 profit])
- * - Stake >= 1000:   1.96x (e.g. Rs 1000 -> Rs 1,960 [+960 profit + Rs 1,000 stake return])
+ * Fair 92% RTP Payout Table (Uniform 0..9 Draws):
+ * - Big / Small (50% chance):        1.84x  -> 0.50 * 1.84 = 92.0% RTP
+ * - Green / Red (40% + 10% split):   1.95x full / 1.40x split (0 or 5) -> 0.40*1.95 + 0.10*1.40 = 92.0% RTP
+ * - Violet (20% chance):             4.60x  -> 0.20 * 4.60 = 92.0% RTP
+ * - Exact Number 0-9 (10% chance):   9.20x  -> 0.10 * 9.20 = 92.0% RTP
  */
-export function getTwoXRateForStake(totalAmount: number): number {
-  if (totalAmount >= 1000) return 1.96;
-  if (totalAmount >= 500) return 1.94;
-  if (totalAmount >= 50) return 1.92;
-  return 1.9;
+export function getTwoXRateForStake(_totalAmount: number): number {
+  return 1.95;
 }
 
 export function getEstimatedReturnAndProfit(
@@ -30,14 +27,13 @@ export function getEstimatedReturnAndProfit(
   selection: string | number,
   totalAmount: number
 ): { totalReturn: number; netProfit: number } {
-  const twoXRate = getTwoXRateForStake(totalAmount);
-  const feeRatio = twoXRate / 2; // 0.95 (<50), 0.96 (50..499), 0.97 (500..999), 0.98 (>=1000)
-
-  let effectiveRate = twoXRate;
-  if (category === 'color' && selection === 'violet') {
-    effectiveRate = 4.5 * feeRatio;
+  let effectiveRate = 1.95;
+  if (category === 'bigSmall') {
+    effectiveRate = 1.84;
+  } else if (category === 'color' && selection === 'violet') {
+    effectiveRate = 4.6;
   } else if (category === 'number') {
-    effectiveRate = 9 * feeRatio;
+    effectiveRate = 9.2;
   }
 
   const totalReturn = Math.round(totalAmount * effectiveRate * 100) / 100;
@@ -53,9 +49,6 @@ export function calculateBetWin(
   const resultColors = result.colors;
   const resultBigSmall = result.bigSmall;
 
-  const twoXRate = getTwoXRateForStake(bet.totalAmount);
-  const feeRatio = twoXRate / 2;
-
   let won = false;
   let effectiveRate = 0;
 
@@ -64,35 +57,35 @@ export function calculateBetWin(
     if (chosenColor === 'green') {
       if (resultNum === 5) {
         won = true;
-        effectiveRate = 1.5 * feeRatio;
+        effectiveRate = 1.4;
       } else if (resultColors.includes('green')) {
         won = true;
-        effectiveRate = twoXRate;
+        effectiveRate = 1.95;
       }
     } else if (chosenColor === 'red') {
       if (resultNum === 0) {
         won = true;
-        effectiveRate = 1.5 * feeRatio;
+        effectiveRate = 1.4;
       } else if (resultColors.includes('red')) {
         won = true;
-        effectiveRate = twoXRate;
+        effectiveRate = 1.95;
       }
     } else if (chosenColor === 'violet') {
       if (resultColors.includes('violet')) {
         won = true;
-        effectiveRate = 4.5 * feeRatio;
+        effectiveRate = 4.6;
       }
     }
   } else if (bet.category === 'number') {
     const chosenNum = Number(bet.selection);
     if (chosenNum === resultNum) {
       won = true;
-      effectiveRate = 9 * feeRatio;
+      effectiveRate = 9.2;
     }
   } else if (bet.category === 'bigSmall') {
     if (bet.selection === resultBigSmall) {
       won = true;
-      effectiveRate = twoXRate;
+      effectiveRate = 1.84;
     }
   }
 
@@ -111,11 +104,6 @@ function getCryptoRandom(): number {
   return Math.random();
 }
 
-function pickCryptoRandom<T>(items: T[]): T {
-  const idx = Math.floor(getCryptoRandom() * items.length);
-  return items[Math.min(idx, items.length - 1)];
-}
-
 export function generateSingleDrawResult(
   period: string,
   timestamp: number = Date.now()
@@ -131,129 +119,16 @@ export function generateSingleDrawResult(
 }
 
 /**
- * Balanced Strategic Draw Generator (mirrors server settlement behavior):
- * - Gives players a realistic ~45% base win rate on normal stakes (~36% medium, ~28% high stakes)
- *   so gameplay stays rewarding while keeping house sustainability.
- * - Includes consecutive-loss streak recovery: after 2–3 losses in a row, strongly boosts
- *   win probability so players don't get stuck in frustrating endless losing streaks.
- * - Ensures winning rolls strictly pick from genuine winning candidates (no 0-payout traps).
+ * Unbiased Fair Random Draw Generator (offline fallback only; server pre-commits SHA-256 hash).
+ * Zero per-user targeting — pure uniform 0..9 draw at 92% RTP.
  */
 export function generateStrategicDrawResult(
   period: string,
-  activeBets: UserBet[],
-  recentHistory: DrawResult[] = [],
+  _activeBets: UserBet[],
+  _recentHistory: DrawResult[] = [],
   timestamp: number = Date.now()
 ): DrawResult {
-  const periodBets = activeBets.filter(
-    (b) => b.period === period && b.status === 'pending'
-  );
-  const lastNum = recentHistory[0]?.number;
-  const secondLastNum = recentHistory[1]?.number;
-
-  // No player bets in this period: pick high-entropy unpredictable number
-  if (periodBets.length === 0) {
-    let candidates = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    const filtered = candidates.filter((n) => {
-      if (n === lastNum && getCryptoRandom() < 0.7) return false;
-      if (n === secondLastNum && getCryptoRandom() < 0.4) return false;
-      return true;
-    });
-    if (filtered.length > 0) {
-      candidates = filtered;
-    }
-    const chosen = pickCryptoRandom(candidates);
-    return {
-      period,
-      number: chosen,
-      bigSmall: getBigSmallForNumber(chosen),
-      colors: getColorsForNumber(chosen),
-      timestamp
-    };
-  }
-
-  // Evaluate exact house payout for every candidate number 0..9
-  const evaluations = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => {
-    const candidate: DrawResult = {
-      period,
-      number: num,
-      bigSmall: getBigSmallForNumber(num),
-      colors: getColorsForNumber(num),
-      timestamp
-    };
-    let totalPayout = 0;
-    for (const bet of periodBets) {
-      const { winAmount } = calculateBetWin(bet, candidate);
-      totalPayout += winAmount;
-    }
-    return { num, candidate, totalPayout };
-  });
-
-  const totalStaked = periodBets.reduce((sum, b) => sum + b.totalAmount, 0);
-  const minPayout = Math.min(...evaluations.map((e) => e.totalPayout));
-  const lowestPayoutPool = evaluations.filter((e) => e.totalPayout <= minPayout + 0.01);
-
-  const positivePool = evaluations.filter((e) => e.totalPayout > 0);
-  const profitPool = evaluations.filter((e) => e.totalPayout >= totalStaked);
-  const winningCandidates = profitPool.length > 0 ? profitPool : positivePool;
-
-  // Compute recent consecutive losing rounds for streak recovery
-  const settled = activeBets.filter(
-    (b) => (b.status === 'won' || b.status === 'lost') && b.period !== period
-  );
-  const roundMap = new Map<string, { stake: number; payout: number; latestTs: number }>();
-  for (const b of settled) {
-    const key = `${b.mode || 60}:${b.period}`;
-    const entry = roundMap.get(key) || { stake: 0, payout: 0, latestTs: 0 };
-    entry.stake += b.totalAmount || 0;
-    entry.payout += b.winAmount || 0;
-    if ((b.timestamp || 0) > entry.latestTs) entry.latestTs = b.timestamp || 0;
-    roundMap.set(key, entry);
-  }
-  const orderedRounds = Array.from(roundMap.values()).sort((a, b) => b.latestTs - a.latestTs);
-  let consecutiveLosses = 0;
-  for (const r of orderedRounds) {
-    if (r.payout < r.stake) consecutiveLosses += 1;
-    else break;
-  }
-
-  const minWinPayout =
-    winningCandidates.length > 0
-      ? Math.min(...winningCandidates.map((e) => e.totalPayout))
-      : 0;
-  const isHighMultiplierOnly = winningCandidates.length > 0 && minWinPayout > totalStaked * 3.5;
-
-  let playerWinChance: number;
-  if (isHighMultiplierOnly) {
-    playerWinChance = consecutiveLosses >= 4 ? 0.14 : consecutiveLosses >= 2 ? 0.1 : 0.07;
-  } else {
-    let baseChance = totalStaked >= 2000 ? 0.24 : totalStaked >= 500 ? 0.32 : 0.36;
-    if (orderedRounds.length === 0 && totalStaked < 500) {
-      baseChance = Math.max(baseChance, 0.55);
-    }
-    if (consecutiveLosses === 1) {
-      baseChance += totalStaked >= 500 ? 0.06 : 0.08;
-    } else if (consecutiveLosses === 2) {
-      baseChance += totalStaked >= 2000 ? 0.12 : totalStaked >= 500 ? 0.18 : 0.24;
-    } else if (consecutiveLosses >= 3) {
-      baseChance = totalStaked >= 2000 ? 0.55 : totalStaked >= 500 ? 0.68 : 0.78;
-    }
-    playerWinChance = Math.min(0.85, baseChance);
-  }
-
-  if (winningCandidates.length > 0 && getCryptoRandom() < playerWinChance) {
-    const controlledWins = winningCandidates.filter(
-      (e) => e.totalPayout <= Math.max(totalStaked * 3.0, 500)
-    );
-    const preferredWinPool =
-      controlledWins.length > 0 && getCryptoRandom() < 0.88 ? controlledWins : winningCandidates;
-    const nonRepeatingWin = preferredWinPool.filter((e) => e.num !== lastNum);
-    const finalWinPool = nonRepeatingWin.length > 0 ? nonRepeatingWin : preferredWinPool;
-    return pickCryptoRandom(finalWinPool).candidate;
-  }
-
-  const nonRepeating = lowestPayoutPool.filter((e) => e.num !== lastNum);
-  const pool = nonRepeating.length > 0 ? nonRepeating : lowestPayoutPool;
-  return pickCryptoRandom(pool).candidate;
+  return generateSingleDrawResult(period, timestamp);
 }
 
 let serverTimeOffsetMs = 0;

@@ -98,7 +98,7 @@ service cloud.firestore {
 
     function isValidBet(data) {
       return data.keys().hasAll(['id', 'userId', 'mode', 'period', 'category', 'selection', 'totalAmount', 'multiplier', 'status', 'winAmount', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'userId', 'userName', 'mode', 'period', 'category', 'selection', 'totalAmount', 'multiplier', 'status', 'winAmount', 'profit', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'userName', 'mode', 'period', 'category', 'selection', 'totalAmount', 'multiplier', 'status', 'winAmount', 'profit', 'roundHash', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && isValidId(data.userId)
         && (data.userId == request.auth.uid || isAdmin())
@@ -112,6 +112,7 @@ service cloud.firestore {
         && data.status in ['pending', 'won', 'lost']
         && data.winAmount is number && data.winAmount >= 0 && data.winAmount <= 100000000
         && (!('profit' in data) || (data.profit is number && data.profit >= -10000000 && data.profit <= 100000000))
+        && (!('roundHash' in data) || (data.roundHash is string && data.roundHash.size() <= 128))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -131,13 +132,27 @@ service cloud.firestore {
 
     function isValidDrawRecord(data) {
       return data.keys().hasAll(['period', 'number', 'bigSmall', 'primaryColor', 'hasViolet', 'createdAt'])
-        && data.keys().hasOnly(['period', 'number', 'bigSmall', 'primaryColor', 'hasViolet', 'createdAt'])
+        && data.keys().hasOnly(['period', 'number', 'bigSmall', 'primaryColor', 'hasViolet', 'commitHash', 'serverSeed', 'createdAt'])
         && data.period is string && data.period.size() >= 6 && data.period.size() <= 32 && data.period.matches('^[a-zA-Z0-9_\\-]+$')
         && data.number is number && data.number >= 0 && data.number <= 9
         && data.bigSmall in ['Big', 'Small']
         && data.primaryColor in ['green', 'red']
         && data.hasViolet is bool
+        && (!('commitHash' in data) || (data.commitHash is string && data.commitHash.size() <= 128))
+        && (!('serverSeed' in data) || (data.serverSeed is string && data.serverSeed.size() <= 128))
         && data.createdAt is timestamp;
+    }
+
+    function isValidBlockedPhone(data, phoneId) {
+      return data.keys().hasAll(['phoneId', 'phone', 'blockedByUid', 'blockedAt'])
+        && data.keys().hasOnly(['phoneId', 'phone', 'blockedByUid', 'blockedAt'])
+        && isValidId(data.phoneId)
+        && data.phoneId == phoneId
+        && data.phoneId.size() >= 7
+        && data.phoneId.size() <= 24
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24
+        && isValidId(data.blockedByUid)
+        && data.blockedAt is timestamp;
     }
 
     match /test/connection {
@@ -159,6 +174,19 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['email']);
       allow delete: if isBootstrappedAdmin() && isValidId(userId) && userId != request.auth.uid;
+    }
+
+    match /blocked_phones/{phoneId} {
+      allow get: if isValidId(phoneId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isVerified()
+        && isValidId(phoneId)
+        && isAdmin()
+        && isValidBlockedPhone(incoming(), phoneId)
+        && incoming().blockedByUid == request.auth.uid
+        && incoming().blockedAt == request.time;
+      allow update: if false;
+      allow delete: if isVerified() && isValidId(phoneId) && isAdmin();
     }
 
     match /users/{userId} {

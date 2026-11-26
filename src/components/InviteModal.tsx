@@ -28,13 +28,10 @@ export const InviteModal: React.FC<InviteModalProps> = ({
 
   if (!isOpen) return null;
 
-  const publicAppUrl = 'https://ais-pre-5m4qss4p5cpk5y3gbkgsvr-636574711104.asia-southeast1.run.app';
-  const currentUrl =
-    typeof window !== 'undefined' && window.location.origin.includes('run.app')
-      ? window.location.origin
-      : publicAppUrl;
-  const activeCode = referralCode || 'MUNA888';
-  const inviteLink = `${currentUrl}/?invite=${activeCode}`;
+  const publicAppUrl = 'https://muna-wingo.vercel.app';
+  const currentUrl = publicAppUrl;
+  const activeCode = (referralCode || 'MUNA888').trim();
+  const inviteLink = `${currentUrl}/?ref=${encodeURIComponent(activeCode)}`;
 
   const shareText =
     language === 'ur'
@@ -91,12 +88,12 @@ export const InviteModal: React.FC<InviteModalProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-base leading-tight">
-                {language === 'ur' ? 'دوستوں کو انوائٹ کریں (7% کمیشن)' : 'Invite Friends (7% Commission)'}
+                {language === 'ur' ? 'دوستوں کو انوائٹ کریں (Rs 10 + 7% کمیشن)' : 'Invite Friends (Rs 10 + 7% Commission)'}
               </h3>
               <p className="text-[11px] text-white/85">
                 {language === 'ur'
-                  ? 'ہر دوست کے ڈپازٹ پر 7% فوری کمیشن کمائیں'
-                  : 'Earn 7% instant commission on every friend deposit'}
+                  ? 'ہر دوست کے سائن اپ پر Rs 10 اور ڈپازٹ پر 7% کمیشن کمائیں'
+                  : 'Earn Rs 10 per signup + 7% commission on deposits'}
               </p>
             </div>
           </div>
@@ -110,7 +107,7 @@ export const InviteModal: React.FC<InviteModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-4 space-y-3 text-center overflow-y-auto">
-          {/* Logo & 7% Highlight */}
+          {/* Logo & Bonus Highlight */}
           <div className="flex flex-col items-center">
             <div className="w-16 h-16 rounded-full overflow-hidden shadow-lg border-2 border-white mb-2 ring-2 ring-amber-400/60">
               <img
@@ -122,13 +119,13 @@ export const InviteModal: React.FC<InviteModalProps> = ({
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 border border-amber-300 text-amber-900 text-xs font-black mb-1">
               <Sparkles className="w-3.5 h-3.5 text-amber-600 fill-amber-400" />
               <span>
-                {language === 'ur' ? 'شیئر اور انوائٹ پر 7% کمیشن!' : '7% Referral Commission Per Invite!'}
+                {language === 'ur' ? 'Rs 10 بونس + 7% ریفرل کمیشن!' : 'Rs 10 Signup Bonus + 7% Commission!'}
               </span>
             </div>
             <p className="text-[11px] text-slate-600 mt-0.5 max-w-xs leading-snug">
               {language === 'ur'
-                ? 'آپ کا دوست جتنی رقم ڈپازٹ کرے گا، اس کا 7% کمیشن آپ کے گیم بیلنس میں شامل ہوگا!'
-                : 'Every time your invited friend deposits, 7% commission is added directly to your balance!'}
+                ? 'دوست کے جوائن کرتے ہی Rs 10 فوری بونس اور اس کے ہر ڈپازٹ پر 7% کمیشن آپ کے بیلنس میں شامل ہوگا!'
+                : 'Get Rs 10 instantly when a friend signs up with your link, plus 7% on every deposit they make!'}
             </p>
           </div>
 
@@ -146,7 +143,7 @@ export const InviteModal: React.FC<InviteModalProps> = ({
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-2.5">
               <div className="flex items-center gap-1 text-[10px] font-semibold text-amber-800">
                 <Gift className="w-3.5 h-3.5" />
-                <span>{language === 'ur' ? '7% کمائی (کمیشن)' : '7% Earned Bonus'}</span>
+                <span>{language === 'ur' ? 'کل ریفرل کمائی' : 'Total Referral Earned'}</span>
               </div>
               <div className="text-base font-black text-amber-900 font-mono mt-0.5">
                 Rs {earnedCommission.toLocaleString()}
@@ -157,7 +154,7 @@ export const InviteModal: React.FC<InviteModalProps> = ({
           {/* 7% Commission Examples Box */}
           <div className="bg-gradient-to-r from-slate-50 to-blue-50/70 rounded-2xl p-2.5 border border-slate-200 text-[11px]">
             <div className="font-bold text-slate-700 mb-1.5">
-              {language === 'ur' ? '7% انوائٹ کمیشن مثال (Friend Deposit → You Earn):' : '7% Commission Examples:'}
+              {language === 'ur' ? 'انوائٹ بونس و 7% کمیشن مثال:' : 'Rs 10 Signup + 7% Deposit Commission:'}
             </div>
             <div className="grid grid-cols-3 gap-1.5 font-mono">
               <div className="bg-white rounded-xl py-1.5 px-1 border border-slate-200">

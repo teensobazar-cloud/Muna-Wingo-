@@ -15,6 +15,18 @@ interface DrawResult {
   bigSmall: BigSmallType;
   colors: ColorType[];
   timestamp: number;
+  commitHash?: string;
+  serverSeed?: string;
+  isManualOverride?: boolean;
+}
+
+interface RoundCommit {
+  mode: GameTimeOption;
+  period: string;
+  serverSeed: string;
+  number: number;
+  commitHash: string;
+  createdAt: number;
 }
 
 interface ServerUser {
@@ -24,6 +36,7 @@ interface ServerUser {
   password: string;
   inviteCode?: string;
   balance: number;
+  balanceUpdatedAt?: number;
   referralEarnings: number;
   createdAt: number;
   lastSeenAt: number;
@@ -63,6 +76,7 @@ interface ServerBet {
   winAmount: number;
   profit?: number;
   multiplier: number;
+  roundHash?: string;
   timestamp: number;
 }
 
@@ -85,6 +99,8 @@ interface DatabaseSchema {
   forcedNumbers?: Record<GameTimeOption, { number: number; targetPeriod?: string; setAt?: number } | null>;
   deletedUserIds?: string[];
   deletedPhones?: string[];
+  blockedPhones?: string[];
+  roundCommits?: Record<string, RoundCommit>;
   adminPin: string;
 }
 
@@ -106,13 +122,7 @@ function getBigSmallForNumber(num: number): BigSmallType {
   return num >= 5 ? 'Big' : 'Small';
 }
 
-function getTwoXRateForStake(totalAmount: number): number {
-  if (totalAmount >= 1000) return 1.96;
-  if (totalAmount >= 500) return 1.94;
-  if (totalAmount >= 50) return 1.92;
-  return 1.9;
-}
-
+// Fair 92% RTP payout curve across every bet category
 function calculateBetWin(
   bet: Pick<ServerBet, 'category' | 'selection' | 'totalAmount'>,
   result: DrawResult
@@ -120,9 +130,6 @@ function calculateBetWin(
   const resultNum = result.number;
   const resultColors = result.colors;
   const resultBigSmall = result.bigSmall;
-
-  const twoXRate = getTwoXRateForStake(bet.totalAmount);
-  const feeRatio = twoXRate / 2;
 
   let won = false;
   let effectiveRate = 0;
@@ -132,45 +139,41 @@ function calculateBetWin(
     if (chosenColor === 'green') {
       if (resultNum === 5) {
         won = true;
-        effectiveRate = 1.5 * feeRatio;
+        effectiveRate = 1.4;
       } else if (resultColors.includes('green')) {
         won = true;
-        effectiveRate = twoXRate;
+        effectiveRate = 1.95;
       }
     } else if (chosenColor === 'red') {
       if (resultNum === 0) {
         won = true;
-        effectiveRate = 1.5 * feeRatio;
+        effectiveRate = 1.4;
       } else if (resultColors.includes('red')) {
         won = true;
-        effectiveRate = twoXRate;
+        effectiveRate = 1.95;
       }
     } else if (chosenColor === 'violet') {
       if (resultColors.includes('violet')) {
         won = true;
-        effectiveRate = 4.5 * feeRatio;
+        effectiveRate = 4.6;
       }
     }
   } else if (bet.category === 'number') {
     const chosenNum = Number(bet.selection);
     if (chosenNum === resultNum) {
       won = true;
-      effectiveRate = 9 * feeRatio;
+      effectiveRate = 9.2;
     }
   } else if (bet.category === 'bigSmall') {
     if (bet.selection === resultBigSmall) {
       won = true;
-      effectiveRate = twoXRate;
+      effectiveRate = 1.84;
     }
   }
 
   const winAmount = won ? Math.round(bet.totalAmount * effectiveRate * 100) / 100 : 0;
   const profit = won ? Math.round((winAmount - bet.totalAmount) * 100) / 100 : -bet.totalAmount;
   return { won, winAmount, profit };
-}
-
-function getCryptoFloat(): number {
-  return crypto.randomBytes(4).readUInt32BE(0) / 4294967296;
 }
 
 function pickCryptoRandom<T>(items: T[]): T {
@@ -189,166 +192,23 @@ function getPeriodForMode(mode: GameTimeOption, timestamp: number = Date.now()):
   return `${yyyy}${mm}${dd}${String(periodIndex).padStart(5, '0')}`;
 }
 
-function generateSingleDrawResult(period: string, timestamp: number = Date.now()): DrawResult {
-  const number = crypto.randomInt(0, 10);
+function createRoundCommitRecord(mode: GameTimeOption, period: string): RoundCommit {
+  const serverSeed = crypto.randomBytes(16).toString('hex');
+  const drawDigest = crypto.createHash('sha256').update(`${serverSeed}:${mode}:${period}`).digest();
+  const number = drawDigest.readUInt32BE(0) % 10;
+  const commitHash = crypto
+    .createHash('sha256')
+    .update(`${serverSeed}:${mode}:${period}:${number}`)
+    .digest('hex');
+
   return {
-    period,
-    number,
-    bigSmall: getBigSmallForNumber(number),
-    colors: getColorsForNumber(number),
-    timestamp,
-  };
-}
-
-function getPlayerRecentStreak(
-  periodBets: ServerBet[],
-  allBets: ServerBet[],
-  currentMode: GameTimeOption,
-  currentPeriod: string
-): { consecutiveLosses: number; settledRoundCount: number } {
-  const userIds = new Set(periodBets.map((b) => b.userId).filter(Boolean));
-  const settled = allBets.filter(
-    (b) =>
-      (b.status === 'won' || b.status === 'lost') &&
-      !(b.mode === currentMode && b.period === currentPeriod) &&
-      (userIds.size === 0 || (b.userId && userIds.has(b.userId)))
-  );
-
-  if (settled.length === 0) {
-    return { consecutiveLosses: 0, settledRoundCount: 0 };
-  }
-
-  // Group by round key keeping newest timestamp order
-  const roundMap = new Map<string, { stake: number; payout: number; latestTs: number }>();
-  for (const b of settled) {
-    const key = `${b.mode || 60}:${b.period}`;
-    const entry = roundMap.get(key) || { stake: 0, payout: 0, latestTs: 0 };
-    entry.stake += b.totalAmount || 0;
-    entry.payout += b.winAmount || 0;
-    if ((b.timestamp || 0) > entry.latestTs) entry.latestTs = b.timestamp || 0;
-    roundMap.set(key, entry);
-  }
-
-  const orderedRounds = Array.from(roundMap.values()).sort((a, b) => b.latestTs - a.latestTs);
-  let consecutiveLosses = 0;
-  for (const r of orderedRounds) {
-    if (r.payout < r.stake) {
-      consecutiveLosses += 1;
-    } else {
-      break;
-    }
-  }
-  return { consecutiveLosses, settledRoundCount: orderedRounds.length };
-}
-
-function generateStrategicDrawResult(
-  mode: GameTimeOption,
-  period: string,
-  activeBets: ServerBet[],
-  recentHistory: DrawResult[],
-  timestamp: number = Date.now()
-): DrawResult {
-  const periodBets = activeBets.filter(
-    (b) => b.mode === mode && b.period === period && b.status === 'pending'
-  );
-  const lastNum = recentHistory[0]?.number;
-  const secondLastNum = recentHistory[1]?.number;
-
-  if (periodBets.length === 0) {
-    let candidates = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    const filtered = candidates.filter((n) => {
-      if (n === lastNum && getCryptoFloat() < 0.7) return false;
-      if (n === secondLastNum && getCryptoFloat() < 0.4) return false;
-      return true;
-    });
-    if (filtered.length > 0) {
-      candidates = filtered;
-    }
-    const chosen = pickCryptoRandom(candidates);
-    return {
-      period,
-      number: chosen,
-      bigSmall: getBigSmallForNumber(chosen),
-      colors: getColorsForNumber(chosen),
-      timestamp,
-    };
-  }
-
-  const evaluations = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => {
-    const candidate: DrawResult = {
-      period,
-      number: num,
-      bigSmall: getBigSmallForNumber(num),
-      colors: getColorsForNumber(num),
-      timestamp,
-    };
-    let totalPayout = 0;
-    for (const bet of periodBets) {
-      const { winAmount } = calculateBetWin(bet, candidate);
-      totalPayout += winAmount;
-    }
-    return { num, candidate, totalPayout };
-  });
-
-  const totalStaked = periodBets.reduce((sum, b) => sum + b.totalAmount, 0);
-  const minPayout = Math.min(...evaluations.map((e) => e.totalPayout));
-  const lowestPayoutPool = evaluations.filter((e) => e.totalPayout <= minPayout + 0.01);
-
-  const positivePool = evaluations.filter((e) => e.totalPayout > 0);
-  const profitPool = evaluations.filter((e) => e.totalPayout >= totalStaked);
-  const winningCandidates = profitPool.length > 0 ? profitPool : positivePool;
-
-  const { consecutiveLosses, settledRoundCount } = getPlayerRecentStreak(
-    periodBets,
-    activeBets,
     mode,
-    period
-  );
-
-  // Determine if the smallest available win is a high-multiplier (e.g. 9x exact number bet)
-  const minWinPayout =
-    winningCandidates.length > 0
-      ? Math.min(...winningCandidates.map((e) => e.totalPayout))
-      : 0;
-  const isHighMultiplierOnly = winningCandidates.length > 0 && minWinPayout > totalStaked * 3.5;
-
-  let playerWinChance: number;
-  if (isHighMultiplierOnly) {
-    // High payout bets (e.g., 9x exact number): realistic ~8–9% win rate with gentle streak recovery
-    playerWinChance = consecutiveLosses >= 4 ? 0.14 : consecutiveLosses >= 2 ? 0.1 : 0.07;
-  } else {
-    // Standard 1.5x–2x bets: ~45% effective win rate on normal stakes (~40% medium, ~30% high)
-    let baseChance = totalStaked >= 2000 ? 0.24 : totalStaked >= 500 ? 0.32 : 0.36;
-    // Welcome boost for a player's very first bet so they get an early win
-    if (settledRoundCount === 0 && totalStaked < 500) {
-      baseChance = Math.max(baseChance, 0.55);
-    }
-    if (consecutiveLosses === 1) {
-      baseChance += totalStaked >= 500 ? 0.06 : 0.08;
-    } else if (consecutiveLosses === 2) {
-      baseChance += totalStaked >= 2000 ? 0.12 : totalStaked >= 500 ? 0.18 : 0.24;
-    } else if (consecutiveLosses >= 3) {
-      baseChance = totalStaked >= 2000 ? 0.55 : totalStaked >= 500 ? 0.68 : 0.78;
-    }
-    playerWinChance = Math.min(0.85, baseChance);
-  }
-
-  if (winningCandidates.length > 0 && getCryptoFloat() < playerWinChance) {
-    // Prefer controlled reasonable wins (up to ~3x) when available so normal wins pay cleanly
-    const controlledWins = winningCandidates.filter(
-      (e) => e.totalPayout <= Math.max(totalStaked * 3.0, 500)
-    );
-    const preferredWinPool =
-      controlledWins.length > 0 && getCryptoFloat() < 0.88 ? controlledWins : winningCandidates;
-    const nonRepeatingWin = preferredWinPool.filter((e) => e.num !== lastNum);
-    const finalWinPool = nonRepeatingWin.length > 0 ? nonRepeatingWin : preferredWinPool;
-    return pickCryptoRandom(finalWinPool).candidate;
-  }
-
-  // House win round (lowest payout pool)
-  const nonRepeating = lowestPayoutPool.filter((e) => e.num !== lastNum);
-  const pool = nonRepeating.length > 0 ? nonRepeating : lowestPayoutPool;
-  return pickCryptoRandom(pool).candidate;
+    period,
+    serverSeed,
+    number,
+    commitHash,
+    createdAt: Date.now(),
+  };
 }
 
 function deterministicNumberForSeed(seedStr: string): number {
@@ -405,6 +265,8 @@ function loadDatabase(): DatabaseSchema {
     },
     deletedUserIds: [],
     deletedPhones: [],
+    blockedPhones: [],
+    roundCommits: {},
     adminPin: '786',
   };
 
@@ -438,6 +300,10 @@ function loadDatabase(): DatabaseSchema {
       }
     }
 
+    const legacyDeletedPhones = Array.isArray(parsed.deletedPhones) ? parsed.deletedPhones : [];
+    const existingBlocked = Array.isArray(parsed.blockedPhones) ? parsed.blockedPhones : [];
+    const mergedBlocked = Array.from(new Set([...existingBlocked, ...legacyDeletedPhones].filter(Boolean)));
+
     const db: DatabaseSchema = {
       users: parsed.users || {},
       transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
@@ -445,7 +311,9 @@ function loadDatabase(): DatabaseSchema {
       historyByMode: parsed.historyByMode || empty.historyByMode,
       forcedOutcomes: migratedForced,
       deletedUserIds: Array.isArray(parsed.deletedUserIds) ? parsed.deletedUserIds : [],
-      deletedPhones: Array.isArray(parsed.deletedPhones) ? parsed.deletedPhones : [],
+      deletedPhones: legacyDeletedPhones,
+      blockedPhones: mergedBlocked,
+      roundCommits: parsed.roundCommits && typeof parsed.roundCommits === 'object' ? parsed.roundCommits : {},
       adminPin: typeof parsed.adminPin === 'string' && parsed.adminPin.length >= 3 ? parsed.adminPin : '786',
     };
 
@@ -492,7 +360,82 @@ function saveDatabase() {
 }
 
 function normalizePhone(raw: string): string {
-  return String(raw || '').replace(/\s|-/g, '').trim();
+  return String(raw || '').replace(/[^\d+]/g, '').trim();
+}
+
+function canonicalPhone(raw: string): string {
+  const stripped = normalizePhone(raw).replace(/^\+/, '');
+  if (stripped.startsWith('92') && stripped.length >= 12) {
+    return `0${stripped.slice(2)}`;
+  }
+  return stripped;
+}
+
+function isPhoneBlocked(rawPhone: string): boolean {
+  const clean = normalizePhone(rawPhone);
+  const canon = canonicalPhone(rawPhone);
+  if (!clean && !canon) return false;
+  const list = db.blockedPhones || [];
+  return list.some(
+    (entry) => normalizePhone(entry) === clean || canonicalPhone(entry) === canon
+  );
+}
+
+function addPhoneToBlockList(rawPhone: string) {
+  if (!Array.isArray(db.blockedPhones)) db.blockedPhones = [];
+  if (!Array.isArray(db.deletedPhones)) db.deletedPhones = [];
+  const canon = canonicalPhone(rawPhone);
+  const clean = normalizePhone(rawPhone);
+  const key = canon || clean;
+  if (!key) return;
+  if (!db.blockedPhones.some((b) => canonicalPhone(b) === key || normalizePhone(b) === clean)) {
+    db.blockedPhones.push(key);
+  }
+  if (!db.deletedPhones.includes(key)) {
+    db.deletedPhones.push(key);
+  }
+}
+
+function getOrCreateRoundCommit(mode: GameTimeOption, period: string): { commit: RoundCommit; created: boolean } {
+  if (!db.roundCommits) db.roundCommits = {};
+  const key = `${mode}:${period}`;
+  if (db.roundCommits[key]) {
+    return { commit: db.roundCommits[key], created: false };
+  }
+  const commit = createRoundCommitRecord(mode, period);
+  db.roundCommits[key] = commit;
+
+  // Prune older commits if cache grows large
+  const keys = Object.keys(db.roundCommits);
+  if (keys.length > 200) {
+    keys
+      .sort((a, b) => (db.roundCommits![a]?.createdAt || 0) - (db.roundCommits![b]?.createdAt || 0))
+      .slice(0, keys.length - 160)
+      .forEach((oldKey) => {
+        delete db.roundCommits![oldKey];
+      });
+  }
+  return { commit, created: true };
+}
+
+function getActiveCommitHashes(timestamp: number = Date.now()): Record<GameTimeOption, string> {
+  let anyCreated = false;
+  const map: Record<GameTimeOption, string> = {
+    30: '',
+    60: '',
+    180: '',
+    300: '',
+  };
+  for (const mode of MODES) {
+    const period = getPeriodForMode(mode, timestamp);
+    const { commit, created } = getOrCreateRoundCommit(mode, period);
+    map[mode] = commit.commitHash;
+    if (created) anyCreated = true;
+  }
+  if (anyCreated) {
+    saveDatabase();
+  }
+  return map;
 }
 
 function sanitizeUser(u: ServerUser) {
@@ -502,34 +445,63 @@ function sanitizeUser(u: ServerUser) {
     phone: u.phone,
     inviteCode: u.inviteCode,
     balance: Math.round((u.balance || 0) * 100) / 100,
+    balanceUpdatedAt: u.balanceUpdatedAt || u.lastSeenAt || u.createdAt,
     referralEarnings: Math.round((u.referralEarnings || 0) * 100) / 100,
     createdAt: u.createdAt,
     lastSeenAt: u.lastSeenAt,
   };
 }
 
+function findInviterByCode(codeRaw: string | undefined, excludeUserId?: string): ServerUser | undefined {
+  if (!codeRaw) return undefined;
+  const trimmed = String(codeRaw).trim();
+  if (!trimmed) return undefined;
+  const upper = trimmed.toUpperCase();
+  const canonCode = canonicalPhone(trimmed);
+  return Object.values(db.users).find(
+    (u) =>
+      u.id !== excludeUserId &&
+      (u.id.toUpperCase() === upper ||
+        normalizePhone(u.phone) === normalizePhone(trimmed) ||
+        (canonCode.length >= 7 && canonicalPhone(u.phone) === canonCode))
+  );
+}
+
 function getInvitedCountForUser(user: ServerUser): number {
   const myId = user.id.toUpperCase();
-  return Object.values(db.users).filter(
-    (other) =>
-      other.id !== user.id &&
-      (other.inviteCode?.trim().toUpperCase() === myId ||
-        other.inviteCode?.trim() === user.phone)
-  ).length;
+  const myCanon = canonicalPhone(user.phone);
+  return Object.values(db.users).filter((other) => {
+    if (other.id === user.id || !other.inviteCode) return false;
+    const code = other.inviteCode.trim();
+    return (
+      code.toUpperCase() === myId ||
+      normalizePhone(code) === normalizePhone(user.phone) ||
+      (myCanon.length >= 7 && canonicalPhone(code) === myCanon)
+    );
+  }).length;
+}
+
+function creditReferrerOnSignup(newUser: ServerUser | undefined): ServerUser | undefined {
+  if (!newUser?.inviteCode) return undefined;
+  const inviter = findInviterByCode(newUser.inviteCode, newUser.id);
+  if (!inviter) return undefined;
+  const signupReferralBonus = 10;
+  inviter.balance = Math.round(((inviter.balance || 0) + signupReferralBonus) * 100) / 100;
+  inviter.balanceUpdatedAt = Date.now();
+  inviter.referralEarnings = Math.round(((inviter.referralEarnings || 0) + signupReferralBonus) * 100) / 100;
+  return inviter;
 }
 
 function creditReferrerOnServer(depositor: ServerUser | undefined, depositAmount: number) {
   if (!depositor?.inviteCode || depositAmount <= 0) return;
-  const code = depositor.inviteCode.trim().toUpperCase();
   const commission = Math.round(depositAmount * 0.07);
-  if (!code || commission <= 0) return;
+  if (commission <= 0) return;
 
-  const inviter = Object.values(db.users).find(
-    (u) => u.id !== depositor.id && (u.id.toUpperCase() === code || u.phone === code)
-  );
+  const inviter = findInviterByCode(depositor.inviteCode, depositor.id);
   if (!inviter) return;
 
   inviter.balance = Math.round(((inviter.balance || 0) + commission) * 100) / 100;
+  inviter.balanceUpdatedAt = Date.now();
   inviter.referralEarnings = Math.round(((inviter.referralEarnings || 0) + commission) * 100) / 100;
 }
 
@@ -571,56 +543,7 @@ function getSimpleForcedMap(): Record<GameTimeOption, number | null> {
   };
 }
 
-function pickFromConstrainedPool(
-  mode: GameTimeOption,
-  period: string,
-  candidates: number[],
-  activeBets: ServerBet[],
-  recentHistory: DrawResult[],
-  timestamp: number
-): DrawResult {
-  const periodBets = activeBets.filter(
-    (b) => b.mode === mode && b.period === period && b.status === 'pending'
-  );
-  const lastNum = recentHistory[0]?.number;
-
-  if (periodBets.length === 0) {
-    const nonRepeating = candidates.filter((n) => n !== lastNum);
-    const pool = nonRepeating.length > 0 ? nonRepeating : candidates;
-    const chosen = pickCryptoRandom(pool);
-    return {
-      period,
-      number: chosen,
-      bigSmall: getBigSmallForNumber(chosen),
-      colors: getColorsForNumber(chosen),
-      timestamp,
-    };
-  }
-
-  const evaluations = candidates.map((num) => {
-    const candidate: DrawResult = {
-      period,
-      number: num,
-      bigSmall: getBigSmallForNumber(num),
-      colors: getColorsForNumber(num),
-      timestamp,
-    };
-    let totalPayout = 0;
-    for (const bet of periodBets) {
-      const { winAmount } = calculateBetWin(bet, candidate);
-      totalPayout += winAmount;
-    }
-    return { num, candidate, totalPayout };
-  });
-
-  const minPayout = Math.min(...evaluations.map((e) => e.totalPayout));
-  const lowestPool = evaluations.filter((e) => e.totalPayout <= minPayout + 0.01);
-  const nonRepeating = lowestPool.filter((e) => e.num !== lastNum);
-  const pool = nonRepeating.length > 0 ? nonRepeating : lowestPool;
-  return pickCryptoRandom(pool).candidate;
-}
-
-// Authoritative Round Settlement Engine
+// Authoritative Round Settlement Engine (Pre-committed SHA-256 Provably Fair + 92% RTP)
 function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): DrawResult {
   const existing = (db.historyByMode[mode] || []).find((r) => r.period === finishedPeriod);
   if (existing) {
@@ -628,6 +551,7 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
   }
 
   const now = Date.now();
+  const { commit } = getOrCreateRoundCommit(mode, finishedPeriod);
   const forcedSpec = db.forcedOutcomes[mode];
   let completedResult: DrawResult;
 
@@ -648,17 +572,21 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
         bigSmall: getBigSmallForNumber(num),
         colors: getColorsForNumber(num),
         timestamp: now,
+        commitHash: commit.commitHash,
+        isManualOverride: true,
       };
     } else if (forcedSpec.kind === 'bigSmall' && (forcedSpec.bigSmall === 'Big' || forcedSpec.bigSmall === 'Small')) {
       const pool = forcedSpec.bigSmall === 'Big' ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
-      completedResult = pickFromConstrainedPool(
-        mode,
-        finishedPeriod,
-        pool,
-        db.bets,
-        db.historyByMode[mode] || [],
-        now
-      );
+      const num = pickCryptoRandom(pool);
+      completedResult = {
+        period: finishedPeriod,
+        number: num,
+        bigSmall: getBigSmallForNumber(num),
+        colors: getColorsForNumber(num),
+        timestamp: now,
+        commitHash: commit.commitHash,
+        isManualOverride: true,
+      };
     } else if (forcedSpec.kind === 'color' && forcedSpec.color) {
       const pool =
         forcedSpec.color === 'green'
@@ -666,22 +594,26 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
           : forcedSpec.color === 'red'
           ? [2, 4, 6, 8]
           : [0, 5];
-      completedResult = pickFromConstrainedPool(
-        mode,
-        finishedPeriod,
-        pool,
-        db.bets,
-        db.historyByMode[mode] || [],
-        now
-      );
+      const num = pickCryptoRandom(pool);
+      completedResult = {
+        period: finishedPeriod,
+        number: num,
+        bigSmall: getBigSmallForNumber(num),
+        colors: getColorsForNumber(num),
+        timestamp: now,
+        commitHash: commit.commitHash,
+        isManualOverride: true,
+      };
     } else {
-      completedResult = generateStrategicDrawResult(
-        mode,
-        finishedPeriod,
-        db.bets,
-        db.historyByMode[mode] || [],
-        now
-      );
+      completedResult = {
+        period: finishedPeriod,
+        number: commit.number,
+        bigSmall: getBigSmallForNumber(commit.number),
+        colors: getColorsForNumber(commit.number),
+        timestamp: now,
+        commitHash: commit.commitHash,
+        serverSeed: commit.serverSeed,
+      };
     }
 
     if (forcedSpec.persistent) {
@@ -693,18 +625,21 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
       db.forcedOutcomes[mode] = null;
     }
   } else {
-    completedResult = generateStrategicDrawResult(
-      mode,
-      finishedPeriod,
-      db.bets,
-      db.historyByMode[mode] || [],
-      now
-    );
+    // Pure Provably-Fair Pre-Committed Draw (Zero User Targeting)
+    completedResult = {
+      period: finishedPeriod,
+      number: commit.number,
+      bigSmall: getBigSmallForNumber(commit.number),
+      colors: getColorsForNumber(commit.number),
+      timestamp: now,
+      commitHash: commit.commitHash,
+      serverSeed: commit.serverSeed,
+    };
   }
 
   db.historyByMode[mode] = [completedResult, ...(db.historyByMode[mode] || [])].slice(0, 80);
 
-  // Settle all pending bets for mode + finishedPeriod
+  // Settle all pending bets for mode + finishedPeriod using exact 92% RTP multipliers
   const settledByUser: Record<string, {
     bets: ServerBet[];
     totalReturn: number;
@@ -720,10 +655,12 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
       bet.status = won ? 'won' : 'lost';
       bet.winAmount = winAmount;
       bet.profit = profit;
+      bet.roundHash = completedResult.commitHash;
 
       const user = db.users[bet.userId];
       if (won && winAmount > 0 && user) {
         user.balance = Math.round(((user.balance || 0) + winAmount) * 100) / 100;
+        user.balanceUpdatedAt = Date.now();
       }
 
       if (!settledByUser[bet.userId]) {
@@ -746,6 +683,7 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
     }
   }
 
+  const nextCommitHashes = getActiveCommitHashes(Date.now());
   saveDatabase();
 
   broadcastEvent('round_settled', {
@@ -753,6 +691,7 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
     mode,
     period: finishedPeriod,
     result: completedResult,
+    commitHashes: nextCommitHashes,
     forcedNumbers: getSimpleForcedMap(),
     forcedOutcomes: getForcedOutcomesMap(),
     settledByUser,
@@ -855,12 +794,14 @@ function buildAdminSnapshot() {
     users: usersList,
     deletedUserIds: db.deletedUserIds || [],
     deletedPhones: db.deletedPhones || [],
+    blockedPhones: db.blockedPhones || [],
     transactions: sortedTransactions,
     bets: db.bets.slice(0, 250),
     forcedNumbers: getSimpleForcedMap(),
     forcedOutcomes: getForcedOutcomesMap(),
     forcedMeta: db.forcedOutcomes,
     historyByMode: db.historyByMode,
+    commitHashes: getActiveCommitHashes(now),
     summary: {
       totalUsers: usersList.length,
       newUsers24h: usersList.filter((u) => u.isNew).length,
@@ -913,14 +854,19 @@ export function createApiApp() {
       res,
     };
     sseClients.add(client);
-    res.write(`event: connected\ndata: ${JSON.stringify({ serverTime: Date.now() })}\n\n`);
+    res.write(
+      `event: connected\ndata: ${JSON.stringify({
+        serverTime: Date.now(),
+        commitHashes: getActiveCommitHashes(Date.now()),
+      })}\n\n`
+    );
 
     req.on('close', () => {
       sseClients.delete(client);
     });
   });
 
-  // Auth: Sign Up
+  // Auth: Sign Up (Enforces Mobile Block List + Credits Referrer Bonus)
   app.post('/api/auth/signup', (req: Request, res: Response) => {
     const { fullName, phone, password, inviteCode } = req.body || {};
     const cleanPhone = normalizePhone(phone);
@@ -933,9 +879,16 @@ export function createApiApp() {
     if (!password || String(password).length < 4) {
       return res.status(400).json({ error: 'Password too short' });
     }
+    if (isPhoneBlocked(cleanPhone)) {
+      return res.status(403).json({
+        error: 'PHONE_BLOCKED',
+        blocked: true,
+        message: 'This mobile number has been blocked by Admin.',
+      });
+    }
 
     const exists = Object.values(db.users).find(
-      (u) => normalizePhone(u.phone) === cleanPhone
+      (u) => canonicalPhone(u.phone) === canonicalPhone(cleanPhone) || normalizePhone(u.phone) === cleanPhone
     );
     if (exists) {
       return res.status(409).json({ error: 'Account already exists with this mobile number' });
@@ -943,30 +896,41 @@ export function createApiApp() {
 
     const now = Date.now();
     const id = `USR-${now.toString().slice(-6)}${crypto.randomInt(10, 99)}`;
+    const storedPhone = canonicalPhone(cleanPhone) || cleanPhone;
     const user: ServerUser = {
       id,
       fullName: String(fullName).trim(),
-      phone: cleanPhone,
+      phone: storedPhone,
       password: String(password),
       inviteCode: inviteCode ? String(inviteCode).trim() : undefined,
       balance: 10, // Rs 10 Sign-up Bonus
+      balanceUpdatedAt: now,
       referralEarnings: 0,
       createdAt: now,
       lastSeenAt: now,
     };
 
     db.users[id] = user;
-    if (Array.isArray(db.deletedPhones)) {
-      db.deletedPhones = db.deletedPhones.filter((p) => p !== cleanPhone);
-    }
+    const inviter = creditReferrerOnSignup(user);
+    const commitHashes = getActiveCommitHashes(now);
     saveDatabase();
+
+    if (inviter) {
+      broadcastEvent('balance_updated', {
+        userId: inviter.id,
+        balance: inviter.balance,
+        reason: 'referral_signup_bonus',
+      });
+    }
     broadcastEvent('state_changed', { reason: 'user_signup', userId: id });
 
     return res.json({
       serverTime: Date.now(),
       user: sanitizeUser(user),
       balance: user.balance,
+      balanceUpdatedAt: user.balanceUpdatedAt,
       historyByMode: db.historyByMode,
+      commitHashes,
       transactions: [],
       bets: [],
       referralEarnings: 0,
@@ -974,23 +938,28 @@ export function createApiApp() {
     });
   });
 
-  // Auth: Sign In (also supports auto-sync if an older client passes local user record)
+  // Auth: Sign In
   app.post('/api/auth/signin', (req: Request, res: Response) => {
     const { phone, password } = req.body || {};
     const cleanPhone = normalizePhone(phone);
+    if (isPhoneBlocked(cleanPhone)) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true });
+    }
+
     const found = Object.values(db.users).find(
-      (u) => normalizePhone(u.phone) === cleanPhone
+      (u) => canonicalPhone(u.phone) === canonicalPhone(cleanPhone) || normalizePhone(u.phone) === cleanPhone
     );
 
     if (!found) {
-      const wasDeleted = Boolean(db.deletedPhones?.includes(cleanPhone));
-      return res.status(404).json({ error: 'NO_ACCOUNT', deleted: wasDeleted });
+      const wasDeleted = Boolean(db.deletedPhones?.includes(cleanPhone) || isPhoneBlocked(cleanPhone));
+      return res.status(404).json({ error: 'NO_ACCOUNT', deleted: wasDeleted, blocked: wasDeleted });
     }
     if (found.password !== String(password || '')) {
       return res.status(401).json({ error: 'WRONG_PASSWORD' });
     }
 
     found.lastSeenAt = Date.now();
+    const commitHashes = getActiveCommitHashes(Date.now());
     saveDatabase();
     broadcastEvent('state_changed', { reason: 'user_signin', userId: found.id });
 
@@ -998,7 +967,9 @@ export function createApiApp() {
       serverTime: Date.now(),
       user: sanitizeUser(found),
       balance: found.balance,
+      balanceUpdatedAt: found.balanceUpdatedAt || found.lastSeenAt || found.createdAt,
       historyByMode: db.historyByMode,
+      commitHashes,
       transactions: db.transactions.filter((t) => t.userId === found.id),
       bets: db.bets.filter((b) => b.userId === found.id).slice(0, 100),
       referralEarnings: found.referralEarnings || 0,
@@ -1006,44 +977,57 @@ export function createApiApp() {
     });
   });
 
-  // Ensure a previously local-only user exists on server after upgrade (never resurrect deleted users)
+  // Ensure Firebase / active session syncs cleanly (NEVER resurrect deleted/blocked users!)
   app.post('/api/auth/sync-session', (req: Request, res: Response) => {
-    const { user, localBalance, isGoogleLogin } = req.body || {};
+    const { user, localBalance, isGoogleLogin, isAdminEmail } = req.body || {};
     if (!user || !user.id || !user.phone) {
       return res.status(400).json({ error: 'Invalid session payload' });
     }
     const cleanPhone = normalizePhone(user.phone);
+    const isBlocked = Boolean(cleanPhone && isPhoneBlocked(cleanPhone));
     const isDeletedById = Boolean(db.deletedUserIds?.includes(String(user.id)));
-    const isDeletedByPhone = Boolean(cleanPhone && db.deletedPhones?.includes(cleanPhone));
 
-    if ((isDeletedById || isDeletedByPhone) && !isGoogleLogin) {
-      return res.status(410).json({ error: 'USER_DELETED', deleted: true });
+    if ((isBlocked || isDeletedById) && !isAdminEmail) {
+      return res.status(410).json({
+        error: isBlocked ? 'PHONE_BLOCKED' : 'USER_DELETED',
+        deleted: true,
+        blocked: isBlocked,
+      });
     }
 
     let existing =
       db.users[user.id] ||
-      Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone);
+      Object.values(db.users).find(
+        (u) => canonicalPhone(u.phone) === canonicalPhone(cleanPhone) || normalizePhone(u.phone) === cleanPhone
+      );
 
     if (!existing) {
-      if (isDeletedById && isGoogleLogin) {
-        db.deletedUserIds = (db.deletedUserIds || []).filter((id) => id !== String(user.id));
-        if (cleanPhone) {
-          db.deletedPhones = (db.deletedPhones || []).filter((p) => p !== cleanPhone);
-        }
+      // Only create server record automatically if it's a verified Google sign-in account
+      if (!isGoogleLogin) {
+        return res.status(410).json({ error: 'USER_NOT_IN_DB', deleted: true });
       }
       const now = Date.now();
       existing = {
         id: String(user.id),
         fullName: String(user.fullName || 'Player').trim(),
-        phone: cleanPhone,
-        password: String(user.password || '1234'),
+        phone: canonicalPhone(cleanPhone) || cleanPhone,
+        password: String(user.password || 'google-auth'),
         inviteCode: user.inviteCode ? String(user.inviteCode) : undefined,
         balance: typeof localBalance === 'number' && localBalance >= 0 ? localBalance : 10,
+        balanceUpdatedAt: now,
         referralEarnings: 0,
         createdAt: Number(user.createdAt) || now,
         lastSeenAt: now,
       };
       db.users[existing.id] = existing;
+      const inviter = creditReferrerOnSignup(existing);
+      if (inviter) {
+        broadcastEvent('balance_updated', {
+          userId: inviter.id,
+          balance: inviter.balance,
+          reason: 'referral_signup_bonus',
+        });
+      }
       saveDatabase();
       broadcastEvent('state_changed', { reason: 'user_synced', userId: existing.id });
     } else {
@@ -1051,11 +1035,14 @@ export function createApiApp() {
       saveDatabase();
     }
 
+    const commitHashes = getActiveCommitHashes(Date.now());
     return res.json({
       serverTime: Date.now(),
       user: sanitizeUser(existing),
       balance: existing.balance,
+      balanceUpdatedAt: existing.balanceUpdatedAt || existing.lastSeenAt || existing.createdAt,
       historyByMode: db.historyByMode,
+      commitHashes,
       transactions: db.transactions.filter((t) => t.userId === existing!.id),
       bets: db.bets.filter((b) => b.userId === existing!.id).slice(0, 100),
       referralEarnings: existing.referralEarnings || 0,
@@ -1066,22 +1053,29 @@ export function createApiApp() {
   // Player Live State Polling / Refresh
   app.get('/api/player/state', (req: Request, res: Response) => {
     const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
-    const isDeleted = Boolean(userId && db.deletedUserIds?.includes(userId));
-    const user = userId && !isDeleted ? db.users[userId] : undefined;
-    if (user) {
+    const phoneParam = typeof req.query.phone === 'string' ? req.query.phone : '';
+    const isBlockedById = Boolean(userId && db.deletedUserIds?.includes(userId));
+    const isBlockedByPhone = Boolean(phoneParam && isPhoneBlocked(phoneParam));
+    const user = userId && !isBlockedById && !isBlockedByPhone ? db.users[userId] : undefined;
+    const blocked = isBlockedById || isBlockedByPhone || (user ? isPhoneBlocked(user.phone) : false);
+    if (user && !blocked) {
       user.lastSeenAt = Date.now();
     }
 
+    const now = Date.now();
     return res.json({
-      serverTime: Date.now(),
-      deleted: isDeleted,
-      user: user ? sanitizeUser(user) : null,
-      balance: user ? user.balance : 0,
+      serverTime: now,
+      deleted: blocked || (Boolean(userId) && !user),
+      blocked,
+      user: user && !blocked ? sanitizeUser(user) : null,
+      balance: user && !blocked ? user.balance : 0,
+      balanceUpdatedAt: user && !blocked ? user.balanceUpdatedAt || user.createdAt : 0,
       historyByMode: db.historyByMode,
-      transactions: user ? db.transactions.filter((t) => t.userId === user.id) : [],
-      bets: user ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : [],
-      referralEarnings: user ? user.referralEarnings || 0 : 0,
-      invitedCount: user ? getInvitedCountForUser(user) : 0,
+      commitHashes: getActiveCommitHashes(now),
+      transactions: user && !blocked ? db.transactions.filter((t) => t.userId === user.id) : [],
+      bets: user && !blocked ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : [],
+      referralEarnings: user && !blocked ? user.referralEarnings || 0 : 0,
+      invitedCount: user && !blocked ? getInvitedCountForUser(user) : 0,
     });
   });
 
@@ -1108,6 +1102,7 @@ export function createApiApp() {
           serverTime: now,
           result: null,
           history: db.historyByMode[mode] || [],
+          commitHashes: getActiveCommitHashes(now),
           forcedOutcomes: getForcedOutcomesMap(),
           forcedNumbers: getSimpleForcedMap(),
         });
@@ -1121,14 +1116,16 @@ export function createApiApp() {
       serverTime: Date.now(),
       result,
       history: db.historyByMode[mode] || [],
+      commitHashes: getActiveCommitHashes(Date.now()),
       balance: user ? user.balance : undefined,
+      balanceUpdatedAt: user ? user.balanceUpdatedAt || user.createdAt : undefined,
       bets: user ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : undefined,
       forcedOutcomes: getForcedOutcomesMap(),
       forcedNumbers: getSimpleForcedMap(),
     });
   });
 
-  // Place Bet (Atomic Deduction)
+  // Place Bet (Atomic Deduction + Attaches Active Round Fairness Hash)
   app.post('/api/bets', (req: Request, res: Response) => {
     const {
       userId,
@@ -1145,6 +1142,9 @@ export function createApiApp() {
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+    if (isPhoneBlocked(user.phone) || db.deletedUserIds?.includes(user.id)) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true });
+    }
 
     const totalAmount = Math.round(Number(contractMoney) * Number(quantity) * Number(multiplier) * 100) / 100;
     if (!totalAmount || totalAmount < 1) {
@@ -1155,15 +1155,20 @@ export function createApiApp() {
     }
 
     user.balance = Math.max(0, Math.round((user.balance - totalAmount) * 100) / 100);
+    user.balanceUpdatedAt = Date.now();
     user.lastSeenAt = Date.now();
+
+    const betMode = (MODES.includes(Number(mode) as GameTimeOption) ? Number(mode) : 60) as GameTimeOption;
+    const betPeriod = String(period);
+    const { commit } = getOrCreateRoundCommit(betMode, betPeriod);
 
     const bet: ServerBet = {
       id: `BET-${Date.now()}-${crypto.randomInt(100, 999)}`,
       userId: user.id,
       userName: user.fullName,
       userPhone: user.phone,
-      mode: (MODES.includes(Number(mode) as GameTimeOption) ? Number(mode) : 60) as GameTimeOption,
-      period: String(period),
+      mode: betMode,
+      period: betPeriod,
       category: category as BetCategory,
       selection,
       contractMoney: Number(contractMoney),
@@ -1172,6 +1177,7 @@ export function createApiApp() {
       totalAmount,
       status: 'pending',
       winAmount: 0,
+      roundHash: commit.commitHash,
       timestamp: Date.now(),
     };
 
@@ -1184,7 +1190,7 @@ export function createApiApp() {
     broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, reason: 'bet_placed' });
     broadcastEvent('state_changed', { reason: 'bet_placed', userId: user.id });
 
-    return res.json({ bet, balance: user.balance });
+    return res.json({ bet, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt });
   });
 
   // Submit Deposit
@@ -1252,15 +1258,16 @@ export function createApiApp() {
     if (isCompleted) {
       const totalCredited = numAmount + calcBonus;
       user.balance = Math.round(((user.balance || 0) + totalCredited) * 100) / 100;
+      user.balanceUpdatedAt = Date.now();
       creditReferrerOnServer(user, numAmount);
     }
     user.lastSeenAt = Date.now();
 
     saveDatabase();
-    broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, reason: 'deposit' });
+    broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now(), reason: 'deposit' });
     broadcastEvent('state_changed', { reason: 'deposit', userId: user.id, txId: tx.id });
 
-    return res.json({ tx, balance: user.balance });
+    return res.json({ tx, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now() });
   });
 
   // Submit Withdrawal
@@ -1285,6 +1292,7 @@ export function createApiApp() {
     }
 
     user.balance = Math.max(0, Math.round((user.balance - numAmount) * 100) / 100);
+    user.balanceUpdatedAt = Date.now();
     user.lastSeenAt = Date.now();
 
     const tx: PaymentTransaction = {
@@ -1305,10 +1313,10 @@ export function createApiApp() {
 
     db.transactions.unshift(tx);
     saveDatabase();
-    broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, reason: 'withdraw' });
+    broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt, reason: 'withdraw' });
     broadcastEvent('state_changed', { reason: 'withdraw', userId: user.id, txId: tx.id });
 
-    return res.json({ tx, balance: user.balance });
+    return res.json({ tx, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt });
   });
 
   // ================= ADMIN ENDPOINTS =================
@@ -1328,49 +1336,14 @@ export function createApiApp() {
     return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 
-  // Sync any locally cached users/transactions into server DB (prevents orphaned local records)
+  // Sync only orphaned transactions into server DB (NEVER resurrect users from localStorage)
   app.post('/api/admin/sync-local', (req: Request, res: Response) => {
-    const { pin, users: localUsers, transactions: localTxs, balancesMap } = req.body || {};
+    const { pin, transactions: localTxs } = req.body || {};
     if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
     let changed = false;
-    if (Array.isArray(localUsers)) {
-      for (const lu of localUsers) {
-        if (!lu || !lu.id || !lu.phone) continue;
-        const cleanPhone = normalizePhone(lu.phone);
-        if (
-          db.deletedUserIds?.includes(String(lu.id)) ||
-          (cleanPhone && db.deletedPhones?.includes(cleanPhone))
-        ) {
-          continue;
-        }
-        const existing =
-          db.users[lu.id] ||
-          Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone);
-        if (!existing) {
-          const balFromMap =
-            balancesMap && typeof balancesMap[lu.id] === 'number'
-              ? balancesMap[lu.id]
-              : typeof lu.balance === 'number'
-              ? lu.balance
-              : 10;
-          db.users[String(lu.id)] = {
-            id: String(lu.id),
-            fullName: String(lu.fullName || 'Player').trim(),
-            phone: cleanPhone,
-            password: String(lu.password || '1234'),
-            inviteCode: lu.inviteCode ? String(lu.inviteCode).trim() : undefined,
-            balance: Math.max(0, Number(balFromMap) || 0),
-            referralEarnings: Number(lu.referralEarnings) || 0,
-            createdAt: Number(lu.createdAt) || Date.now(),
-            lastSeenAt: Number(lu.lastSeenAt) || Number(lu.createdAt) || Date.now(),
-          };
-          changed = true;
-        }
-      }
-    }
 
     if (Array.isArray(localTxs)) {
       for (const lt of localTxs) {
@@ -1542,6 +1515,7 @@ export function createApiApp() {
     } else {
       user.balance = Math.max(0, Math.round(numAmount * 100) / 100);
     }
+    user.balanceUpdatedAt = Date.now();
 
     saveDatabase();
     broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, reason: 'admin_balance' });
@@ -1558,19 +1532,43 @@ export function createApiApp() {
     const targetUser = db.users[targetId];
     if (!Array.isArray(db.deletedUserIds)) db.deletedUserIds = [];
     if (!Array.isArray(db.deletedPhones)) db.deletedPhones = [];
+    if (!Array.isArray(db.blockedPhones)) db.blockedPhones = [];
+
     if (targetId && !db.deletedUserIds.includes(targetId)) {
       db.deletedUserIds.push(targetId);
     }
+    let blockedPhone = '';
     if (targetUser?.phone) {
-      const cleanPhone = normalizePhone(targetUser.phone);
-      if (cleanPhone && !db.deletedPhones.includes(cleanPhone)) {
-        db.deletedPhones.push(cleanPhone);
-      }
+      addPhoneToBlockList(targetUser.phone);
+      blockedPhone = canonicalPhone(targetUser.phone) || normalizePhone(targetUser.phone);
     }
+
     delete db.users[targetId];
     db.bets = db.bets.filter((b) => b.userId !== targetId);
     saveDatabase();
+    broadcastEvent('user_deleted', { userId: targetId, phone: blockedPhone });
     broadcastEvent('state_changed', { reason: 'user_deleted', userId: targetId });
+    return res.json({ ok: true, blockedPhone, ...buildAdminSnapshot() });
+  });
+
+  app.post('/api/admin/unblock-phone', (req: Request, res: Response) => {
+    const { pin, phone } = req.body || {};
+    if (!verifyPin(pin)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const clean = normalizePhone(String(phone || ''));
+    const canon = canonicalPhone(String(phone || ''));
+    if (!clean && !canon) {
+      return res.status(400).json({ error: 'Phone required' });
+    }
+    db.blockedPhones = (db.blockedPhones || []).filter(
+      (b) => normalizePhone(b) !== clean && canonicalPhone(b) !== canon
+    );
+    db.deletedPhones = (db.deletedPhones || []).filter(
+      (b) => normalizePhone(b) !== clean && canonicalPhone(b) !== canon
+    );
+    saveDatabase();
+    broadcastEvent('state_changed', { reason: 'phone_unblocked', phone: canon || clean });
     return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 
@@ -1589,6 +1587,7 @@ export function createApiApp() {
       const user = tx.userId ? db.users[tx.userId] : undefined;
       if (user) {
         user.balance = Math.round(((user.balance || 0) + totalCredit) * 100) / 100;
+        user.balanceUpdatedAt = Date.now();
         creditReferrerOnServer(user, tx.amount);
       }
       tx.status = 'completed';
@@ -1598,7 +1597,7 @@ export function createApiApp() {
 
     saveDatabase();
     if (tx.userId && db.users[tx.userId]) {
-      broadcastEvent('balance_updated', { userId: tx.userId, balance: db.users[tx.userId].balance, reason: 'tx_approved' });
+      broadcastEvent('balance_updated', { userId: tx.userId, balance: db.users[tx.userId].balance, balanceUpdatedAt: db.users[tx.userId].balanceUpdatedAt || Date.now(), reason: 'tx_approved' });
     }
     broadcastEvent('state_changed', { reason: 'tx_approved', txId: tx.id, userId: tx.userId });
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
@@ -1618,13 +1617,14 @@ export function createApiApp() {
       const user = tx.userId ? db.users[tx.userId] : undefined;
       if (user) {
         user.balance = Math.round(((user.balance || 0) + tx.amount) * 100) / 100;
+        user.balanceUpdatedAt = Date.now();
       }
     }
     tx.status = 'rejected';
 
     saveDatabase();
     if (tx.userId && db.users[tx.userId]) {
-      broadcastEvent('balance_updated', { userId: tx.userId, balance: db.users[tx.userId].balance, reason: 'tx_rejected' });
+      broadcastEvent('balance_updated', { userId: tx.userId, balance: db.users[tx.userId].balance, balanceUpdatedAt: db.users[tx.userId].balanceUpdatedAt || Date.now(), reason: 'tx_rejected' });
     }
     broadcastEvent('state_changed', { reason: 'tx_rejected', txId: tx.id, userId: tx.userId });
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
@@ -1677,9 +1677,13 @@ export function createApiApp() {
       } else {
         user.balance = Math.max(0, Math.round(((user.balance || 0) - numAmount) * 100) / 100);
       }
+      user.balanceUpdatedAt = Date.now();
     }
 
     saveDatabase();
+    if (user && applyBalance) {
+      broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now(), reason: 'tx_created' });
+    }
     broadcastEvent('state_changed', { reason: 'tx_created', txId: tx.id, userId: user?.id });
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
   });
@@ -1699,14 +1703,19 @@ export function createApiApp() {
     if (tx.type === 'deposit' && updated?.status === 'completed' && tx.status !== 'completed' && user) {
       const addAmt = updated.amount !== undefined ? Number(updated.amount) : tx.amount;
       user.balance = Math.round(((user.balance || 0) + addAmt) * 100) / 100;
+      user.balanceUpdatedAt = Date.now();
     }
     if (tx.type === 'withdraw' && updated?.status === 'rejected' && tx.status === 'pending' && user) {
       const refundAmt = updated.amount !== undefined ? Number(updated.amount) : tx.amount;
       user.balance = Math.round(((user.balance || 0) + refundAmt) * 100) / 100;
+      user.balanceUpdatedAt = Date.now();
     }
 
     Object.assign(tx, updated);
     saveDatabase();
+    if (user) {
+      broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now(), reason: 'tx_updated' });
+    }
     broadcastEvent('state_changed', { reason: 'tx_updated', txId: tx.id, userId: tx.userId });
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
   });
@@ -1777,10 +1786,10 @@ export function createApiApp() {
     }
     if (!Array.isArray(db.deletedUserIds)) db.deletedUserIds = [];
     if (!Array.isArray(db.deletedPhones)) db.deletedPhones = [];
+    if (!Array.isArray(db.blockedPhones)) db.blockedPhones = [];
     for (const u of Object.values(db.users)) {
       if (u.id && !db.deletedUserIds.includes(u.id)) db.deletedUserIds.push(u.id);
-      const cp = normalizePhone(u.phone);
-      if (cp && !db.deletedPhones.includes(cp)) db.deletedPhones.push(cp);
+      if (u.phone) addPhoneToBlockList(u.phone);
     }
     db.users = {};
     db.transactions = [];
