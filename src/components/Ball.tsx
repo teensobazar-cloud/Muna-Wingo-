@@ -89,7 +89,7 @@ export const Ball: React.FC<BallProps> = ({
 
       {showMultiplier && (
         <span className="text-[11px] font-bold text-slate-500 mt-1 select-none">
-          9.2X
+          8.82X
         </span>
       )}
     </div>

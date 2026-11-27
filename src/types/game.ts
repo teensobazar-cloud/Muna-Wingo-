@@ -31,6 +31,7 @@ export interface UserBet {
   profit?: number;
   multiplier: number;
   roundHash?: string;
+  betToken?: string;
   timestamp: number;
 }
 
@@ -65,12 +66,15 @@ export interface RegisteredUser {
   id: string;
   fullName: string;
   phone: string;
+  email?: string;
+  authProvider?: 'mobile' | 'google';
   password?: string;
   inviteCode?: string;
   createdAt: number;
   lastSeenAt?: number;
   balance?: number;
   referralEarnings?: number;
+  invitedCount?: number;
   totalDeposited?: number;
   totalWithdrawn?: number;
   pendingWithdraw?: number;
@@ -78,6 +82,36 @@ export interface RegisteredUser {
   totalWon?: number;
   isNew?: boolean;
   isOnline?: boolean;
+}
+
+export interface AdminNotificationRecord {
+  id: string;
+  eventType: 'signup' | 'login' | 'deposit' | 'withdraw' | 'test';
+  title: string;
+  summary: string;
+  userId?: string;
+  userName?: string;
+  userPhone?: string;
+  amount?: number;
+  method?: string;
+  trxId?: string;
+  emailTo: string;
+  emailStatus: 'sent' | 'not_configured' | 'failed';
+  emailError?: string;
+  timestamp: number;
+}
+
+export interface EmailConfigStatus {
+  notifyEmail: string;
+  smtpConfigured: boolean;
+  resendConfigured: boolean;
+  activeChannel: 'gmail_smtp' | 'resend' | 'none';
+}
+
+export interface WinRatioStats {
+  totalRoundsWithBets: number;
+  playerWins: number;
+  houseWins: number;
 }
 
 export interface AdminSummary {

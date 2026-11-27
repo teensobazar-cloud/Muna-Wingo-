@@ -1,7 +1,26 @@
-// Web Audio API synthesizer for high-fidelity WinGo lottery sound effects
+// Web Audio API synthesizer for high-fidelity WinGo lottery sound effects & gentle background music
+
+export const BG_MUSIC_URL = '/assets/aistudio/screen-20261126-195231_93Ols83A_feed08e8.mp3';
+const BG_MUSIC_VOLUME = 0.02; // Ultra-soft ambient level (~2%, -34 dB) across desktop & mobile/iOS
+const BG_MUSIC_DUCK_VOLUME = 0.006;
+const BG_MUSIC_STORAGE_KEY = 'muna_bg_music_enabled';
 
 let audioCtx: AudioContext | null = null;
 let isMuted = false;
+let isMusicEnabled = (() => {
+  try {
+    const saved = localStorage.getItem(BG_MUSIC_STORAGE_KEY);
+    return saved === null ? true : saved === 'true';
+  } catch {
+    return true;
+  }
+})();
+
+let bgAudio: HTMLAudioElement | null = null;
+let bgMediaSource: MediaElementAudioSourceNode | null = null;
+let bgGainNode: GainNode | null = null;
+let bgDuckTimer: number | null = null;
+let bgInitialized = false;
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -14,19 +33,184 @@ function getAudioContext(): AudioContext | null {
     }
   }
   if (audioCtx && audioCtx.state === 'suspended') {
-    audioCtx.resume();
+    audioCtx.resume().catch(() => {});
   }
   return audioCtx;
+}
+
+function setBgVolumeLevel(targetVolume: number) {
+  const audio = bgAudio;
+  if (!audio) return;
+  if (bgGainNode && audioCtx) {
+    // Keep native element volume at 1.0 so GainNode alone scales cleanly on both Desktop & iOS
+    audio.volume = 1.0;
+    try {
+      bgGainNode.gain.setTargetAtTime(targetVolume, audioCtx.currentTime, 0.04);
+    } catch {
+      bgGainNode.gain.value = targetVolume;
+    }
+  } else {
+    audio.volume = targetVolume;
+  }
+}
+
+function ensureBgAudio(): HTMLAudioElement | null {
+  if (typeof window === 'undefined') return null;
+  if (!bgAudio) {
+    bgAudio = new Audio(BG_MUSIC_URL);
+    bgAudio.loop = true;
+    bgAudio.preload = 'auto';
+    bgAudio.volume = BG_MUSIC_VOLUME;
+    bgAudio.setAttribute('playsinline', 'true');
+  }
+  if (!bgMediaSource) {
+    try {
+      const ctx = getAudioContext();
+      if (ctx) {
+        bgMediaSource = ctx.createMediaElementSource(bgAudio);
+        bgGainNode = ctx.createGain();
+        bgGainNode.gain.value = BG_MUSIC_VOLUME;
+        bgMediaSource.connect(bgGainNode);
+        bgGainNode.connect(ctx.destination);
+        bgAudio.volume = 1.0;
+      }
+    } catch {
+      // Fallback to native HTMLAudioElement.volume if Web Audio routing fails
+      bgMediaSource = null;
+      bgGainNode = null;
+      bgAudio.volume = BG_MUSIC_VOLUME;
+    }
+  }
+  return bgAudio;
+}
+
+function syncBgMusicPlayback() {
+  const audio = ensureBgAudio();
+  if (!audio) return;
+
+  const shouldPlay = !isMuted && isMusicEnabled && (typeof document === 'undefined' || !document.hidden);
+  if (!shouldPlay) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+
+  setBgVolumeLevel(BG_MUSIC_VOLUME);
+  if (audio.paused) {
+    const playPromise = audio.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        // Browser autoplay policy may defer playback until first user gesture
+      });
+    }
+  }
+}
+
+function duckBgMusicTemporarily(durationMs = 700) {
+  const audio = bgAudio;
+  if (!audio || audio.paused || isMuted || !isMusicEnabled) return;
+  try {
+    setBgVolumeLevel(BG_MUSIC_DUCK_VOLUME);
+    if (bgDuckTimer !== null) {
+      window.clearTimeout(bgDuckTimer);
+    }
+    bgDuckTimer = window.setTimeout(() => {
+      bgDuckTimer = null;
+      if (bgAudio && !isMuted && isMusicEnabled) {
+        setBgVolumeLevel(BG_MUSIC_VOLUME);
+      }
+    }, durationMs);
+  } catch {
+    // ignore
+  }
 }
 
 export const soundManager = {
   getMuted: () => isMuted,
   setMuted: (muted: boolean) => {
     isMuted = muted;
+    syncBgMusicPlayback();
   },
   toggleMute: () => {
     isMuted = !isMuted;
+    syncBgMusicPlayback();
     return isMuted;
+  },
+
+  getMusicEnabled: () => isMusicEnabled,
+  setMusicEnabled: (enabled: boolean) => {
+    isMusicEnabled = enabled;
+    try {
+      localStorage.setItem(BG_MUSIC_STORAGE_KEY, String(enabled));
+    } catch {
+      // ignore
+    }
+    syncBgMusicPlayback();
+    return isMusicEnabled;
+  },
+  toggleMusic: () => {
+    const next = !isMusicEnabled;
+    isMusicEnabled = next;
+    try {
+      localStorage.setItem(BG_MUSIC_STORAGE_KEY, String(next));
+    } catch {
+      // ignore
+    }
+    syncBgMusicPlayback();
+    return next;
+  },
+
+  initBackgroundMusic: () => {
+    if (typeof window === 'undefined') return () => {};
+    ensureBgAudio();
+
+    const tryStartOnGesture = () => {
+      if (isMuted || !isMusicEnabled || (typeof document !== 'undefined' && document.hidden)) return;
+      getAudioContext();
+      const audio = ensureBgAudio();
+      if (!audio) return;
+      setBgVolumeLevel(BG_MUSIC_VOLUME);
+      if (audio.paused) {
+        const p = audio.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            removeGestureListeners();
+          }).catch(() => {
+            // Keep listeners until a valid user activation succeeds
+          });
+        }
+      } else {
+        removeGestureListeners();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      syncBgMusicPlayback();
+    };
+
+    const removeGestureListeners = () => {
+      window.removeEventListener('pointerdown', tryStartOnGesture, true);
+      window.removeEventListener('touchstart', tryStartOnGesture, true);
+      window.removeEventListener('click', tryStartOnGesture, true);
+      window.removeEventListener('keydown', tryStartOnGesture, true);
+    };
+
+    if (!bgInitialized) {
+      bgInitialized = true;
+      syncBgMusicPlayback();
+    }
+
+    window.addEventListener('pointerdown', tryStartOnGesture, { capture: true, passive: true });
+    window.addEventListener('touchstart', tryStartOnGesture, { capture: true, passive: true });
+    window.addEventListener('click', tryStartOnGesture, { capture: true, passive: true });
+    window.addEventListener('keydown', tryStartOnGesture, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      removeGestureListeners();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   },
 
   playClick: () => {
@@ -85,6 +269,7 @@ export const soundManager = {
   // "بڑا ٹوم" (Bada Toom) impact sound on 0 / draw time
   playBadaToom: () => {
     if (isMuted) return;
+    duckBgMusicTemporarily(500);
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
@@ -112,6 +297,7 @@ export const soundManager = {
   // Short, sweet, high-quality casino winner chime (duration ~0.35s)
   playWin: () => {
     if (isMuted) return;
+    duckBgMusicTemporarily(850);
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
@@ -196,3 +382,4 @@ export const soundManager = {
     }
   }
 };
+

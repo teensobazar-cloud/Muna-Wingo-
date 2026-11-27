@@ -219,7 +219,7 @@ service cloud.firestore {
           && isValidId(userId)
           && isValidId(docId)
           && (isOwner(userId) || isAdmin())
-          && exists(/databases/$(database)/documents/users/$(userId))
+          && (exists(/databases/$(database)/documents/users/$(userId)) || existsAfter(/databases/$(database)/documents/users/$(userId)))
           && isValidUserPrivateInfo(incoming(), userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time;

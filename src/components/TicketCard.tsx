@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { BookOpen, Sparkles, ShieldCheck, Check } from 'lucide-react';
+import React from 'react';
+import { BookOpen, Sparkles } from 'lucide-react';
 import { Ball } from './Ball';
 import { DrawResult, GameTimeOption, AppTheme } from '../types/game';
 
@@ -22,12 +22,10 @@ export const TicketCard: React.FC<TicketCardProps> = ({
   onOpenRules,
   gameTime,
   onChangeGameTime,
-  commitHash,
   language,
   theme
 }) => {
   const isBlue = theme === 'blue';
-  const [hashCopied, setHashCopied] = useState(false);
 
   // Format seconds into MM:SS
   const mins = Math.floor(secondsRemaining / 60);
@@ -42,13 +40,6 @@ export const TicketCard: React.FC<TicketCardProps> = ({
   const secOnes = secStr[1];
 
   const recentFive = recentResults.slice(0, 5);
-
-  const handleCopyHash = () => {
-    if (!commitHash) return;
-    navigator.clipboard?.writeText(commitHash).catch(() => {});
-    setHashCopied(true);
-    setTimeout(() => setHashCopied(false), 1600);
-  };
 
   return (
     <div className="w-full px-3 pt-3">
@@ -189,30 +180,11 @@ export const TicketCard: React.FC<TicketCardProps> = ({
               </div>
             </div>
 
-            {/* Period Number & Provably Fair Pre-Committed Hash */}
-            <div className="flex flex-col items-end gap-1 pt-0.5">
+            {/* Period Number */}
+            <div className="flex flex-col items-end pt-0.5">
               <div className="text-[11px] sm:text-xs font-bold text-white/95 font-digital tracking-wider">
                 {currentPeriod}
               </div>
-              {commitHash && (
-                <button
-                  type="button"
-                  onClick={handleCopyHash}
-                  title={`Fairness SHA-256 Hash: ${commitHash} (Tap to copy)`}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/20 hover:bg-black/30 text-[9px] font-mono text-emerald-100 border border-white/15 cursor-pointer transition-colors"
-                >
-                  {hashCopied ? (
-                    <Check className="w-2.5 h-2.5 text-emerald-300 shrink-0" />
-                  ) : (
-                    <ShieldCheck className="w-2.5 h-2.5 text-emerald-300 shrink-0" />
-                  )}
-                  <span>
-                    {hashCopied
-                      ? 'Hash Copied'
-                      : `Fair: ${commitHash.slice(0, 6)}...${commitHash.slice(-4)}`}
-                  </span>
-                </button>
-              )}
             </div>
           </div>
         </div>

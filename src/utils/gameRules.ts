@@ -12,14 +12,26 @@ export function getBigSmallForNumber(num: number): BigSmallType {
 }
 
 /**
- * Fair 92% RTP Payout Table (Uniform 0..9 Draws):
- * - Big / Small (50% chance):        1.84x  -> 0.50 * 1.84 = 92.0% RTP
- * - Green / Red (40% + 10% split):   1.95x full / 1.40x split (0 or 5) -> 0.40*1.95 + 0.10*1.40 = 92.0% RTP
- * - Violet (20% chance):             4.60x  -> 0.20 * 4.60 = 92.0% RTP
- * - Exact Number 0-9 (10% chance):   9.20x  -> 0.10 * 9.20 = 92.0% RTP
+ * Stake-Tiered WinGo Payout Table:
+ * - Stakes < Rs 100 (e.g. Rs 10): 5% fee -> 2X bets pay 1.90X (Rs 10 -> Rs 19 return, Rs 9 profit)
+ *   • Green/Red full: 1.90X | Split (0/5): 1.425X | Violet: 4.275X | Number (0-9): 8.55X | Big/Small: 1.90X
+ * - Stakes >= Rs 100 (e.g. Rs 100, Rs 1000): 2% fee -> 2X bets pay 1.96X (Rs 100 -> Rs 196, Rs 1000 -> Rs 1960)
+ *   • Green/Red full: 1.96X | Split (0/5): 1.47X  | Violet: 4.41X  | Number (0-9): 8.82X | Big/Small: 1.96X
  */
-export function getTwoXRateForStake(_totalAmount: number): number {
-  return 1.95;
+export function getPayoutRatesForStake(totalAmount: number): {
+  twoX: number;
+  split: number;
+  violet: number;
+  number: number;
+} {
+  const isStandardTier = Number(totalAmount) >= 100;
+  return isStandardTier
+    ? { twoX: 1.96, split: 1.47, violet: 4.41, number: 8.82 }
+    : { twoX: 1.9, split: 1.425, violet: 4.275, number: 8.55 };
+}
+
+export function getTwoXRateForStake(totalAmount: number): number {
+  return getPayoutRatesForStake(totalAmount).twoX;
 }
 
 export function getEstimatedReturnAndProfit(
@@ -27,13 +39,14 @@ export function getEstimatedReturnAndProfit(
   selection: string | number,
   totalAmount: number
 ): { totalReturn: number; netProfit: number } {
-  let effectiveRate = 1.95;
+  const rates = getPayoutRatesForStake(totalAmount);
+  let effectiveRate = rates.twoX;
   if (category === 'bigSmall') {
-    effectiveRate = 1.84;
+    effectiveRate = rates.twoX;
   } else if (category === 'color' && selection === 'violet') {
-    effectiveRate = 4.6;
+    effectiveRate = rates.violet;
   } else if (category === 'number') {
-    effectiveRate = 9.2;
+    effectiveRate = rates.number;
   }
 
   const totalReturn = Math.round(totalAmount * effectiveRate * 100) / 100;
@@ -48,6 +61,7 @@ export function calculateBetWin(
   const resultNum = result.number;
   const resultColors = result.colors;
   const resultBigSmall = result.bigSmall;
+  const rates = getPayoutRatesForStake(bet.totalAmount);
 
   let won = false;
   let effectiveRate = 0;
@@ -57,35 +71,35 @@ export function calculateBetWin(
     if (chosenColor === 'green') {
       if (resultNum === 5) {
         won = true;
-        effectiveRate = 1.4;
+        effectiveRate = rates.split;
       } else if (resultColors.includes('green')) {
         won = true;
-        effectiveRate = 1.95;
+        effectiveRate = rates.twoX;
       }
     } else if (chosenColor === 'red') {
       if (resultNum === 0) {
         won = true;
-        effectiveRate = 1.4;
+        effectiveRate = rates.split;
       } else if (resultColors.includes('red')) {
         won = true;
-        effectiveRate = 1.95;
+        effectiveRate = rates.twoX;
       }
     } else if (chosenColor === 'violet') {
       if (resultColors.includes('violet')) {
         won = true;
-        effectiveRate = 4.6;
+        effectiveRate = rates.violet;
       }
     }
   } else if (bet.category === 'number') {
     const chosenNum = Number(bet.selection);
     if (chosenNum === resultNum) {
       won = true;
-      effectiveRate = 9.2;
+      effectiveRate = rates.number;
     }
   } else if (bet.category === 'bigSmall') {
     if (bet.selection === resultBigSmall) {
       won = true;
-      effectiveRate = 1.84;
+      effectiveRate = rates.twoX;
     }
   }
 
@@ -119,8 +133,7 @@ export function generateSingleDrawResult(
 }
 
 /**
- * Unbiased Fair Random Draw Generator (offline fallback only; server pre-commits SHA-256 hash).
- * Zero per-user targeting — pure uniform 0..9 draw at 92% RTP.
+ * Offline fallback draw generator (authoritative server uses 30% player win / 70% house profit ratio).
  */
 export function generateStrategicDrawResult(
   period: string,

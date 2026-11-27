@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import type { Request, Response } from 'express';
+import nodemailer from 'nodemailer';
 
 type ColorType = 'green' | 'violet' | 'red';
 type BigSmallType = 'Big' | 'Small';
@@ -33,6 +34,8 @@ interface ServerUser {
   id: string;
   fullName: string;
   phone: string;
+  email?: string;
+  authProvider?: 'mobile' | 'google';
   password: string;
   inviteCode?: string;
   balance: number;
@@ -77,6 +80,7 @@ interface ServerBet {
   profit?: number;
   multiplier: number;
   roundHash?: string;
+  betToken?: string;
   timestamp: number;
 }
 
@@ -90,6 +94,23 @@ interface ForcedOutcomeSpec {
   setAt?: number;
 }
 
+interface AdminNotificationRecord {
+  id: string;
+  eventType: 'signup' | 'login' | 'deposit' | 'withdraw' | 'test';
+  title: string;
+  summary: string;
+  userId?: string;
+  userName?: string;
+  userPhone?: string;
+  amount?: number;
+  method?: string;
+  trxId?: string;
+  emailTo: string;
+  emailStatus: 'sent' | 'not_configured' | 'failed';
+  emailError?: string;
+  timestamp: number;
+}
+
 interface DatabaseSchema {
   users: Record<string, ServerUser>;
   transactions: PaymentTransaction[];
@@ -101,7 +122,34 @@ interface DatabaseSchema {
   deletedPhones?: string[];
   blockedPhones?: string[];
   roundCommits?: Record<string, RoundCommit>;
+  adminNotifications?: AdminNotificationRecord[];
+  winRatePercent?: number;
+  winDeck?: boolean[];
+  winStats?: { totalRoundsWithBets: number; playerWins: number; houseWins: number };
   adminPin: string;
+}
+
+const DEFAULT_WIN_RATE_PERCENT = 30;
+
+function normalizeWinRatePercent(raw: unknown): number {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return DEFAULT_WIN_RATE_PERCENT;
+  return Math.max(5, Math.min(95, n));
+}
+
+function buildShuffledWinDeck(winPercent: number = DEFAULT_WIN_RATE_PERCENT): boolean[] {
+  const pct = normalizeWinRatePercent(winPercent);
+  const deck: boolean[] = [];
+  for (let i = 0; i < 100; i++) {
+    deck.push(i < pct);
+  }
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    const tmp = deck[i];
+    deck[i] = deck[j];
+    deck[j] = tmp;
+  }
+  return deck;
 }
 
 const DATA_DIR = process.env.VERCEL
@@ -122,7 +170,19 @@ function getBigSmallForNumber(num: number): BigSmallType {
   return num >= 5 ? 'Big' : 'Small';
 }
 
-// Fair 92% RTP payout curve across every bet category
+// Stake-Tiered WinGo Payout Table (1.90X under Rs 100 -> Rs 10 returns Rs 19; 1.96X for Rs 100+ -> Rs 100 returns Rs 196, Rs 1000 returns Rs 1960)
+function getPayoutRatesForStake(totalAmount: number): {
+  twoX: number;
+  split: number;
+  violet: number;
+  number: number;
+} {
+  const isStandardTier = Number(totalAmount) >= 100;
+  return isStandardTier
+    ? { twoX: 1.96, split: 1.47, violet: 4.41, number: 8.82 }
+    : { twoX: 1.9, split: 1.425, violet: 4.275, number: 8.55 };
+}
+
 function calculateBetWin(
   bet: Pick<ServerBet, 'category' | 'selection' | 'totalAmount'>,
   result: DrawResult
@@ -130,6 +190,7 @@ function calculateBetWin(
   const resultNum = result.number;
   const resultColors = result.colors;
   const resultBigSmall = result.bigSmall;
+  const rates = getPayoutRatesForStake(bet.totalAmount);
 
   let won = false;
   let effectiveRate = 0;
@@ -139,35 +200,35 @@ function calculateBetWin(
     if (chosenColor === 'green') {
       if (resultNum === 5) {
         won = true;
-        effectiveRate = 1.4;
+        effectiveRate = rates.split;
       } else if (resultColors.includes('green')) {
         won = true;
-        effectiveRate = 1.95;
+        effectiveRate = rates.twoX;
       }
     } else if (chosenColor === 'red') {
       if (resultNum === 0) {
         won = true;
-        effectiveRate = 1.4;
+        effectiveRate = rates.split;
       } else if (resultColors.includes('red')) {
         won = true;
-        effectiveRate = 1.95;
+        effectiveRate = rates.twoX;
       }
     } else if (chosenColor === 'violet') {
       if (resultColors.includes('violet')) {
         won = true;
-        effectiveRate = 4.6;
+        effectiveRate = rates.violet;
       }
     }
   } else if (bet.category === 'number') {
     const chosenNum = Number(bet.selection);
     if (chosenNum === resultNum) {
       won = true;
-      effectiveRate = 9.2;
+      effectiveRate = rates.number;
     }
   } else if (bet.category === 'bigSmall') {
     if (bet.selection === resultBigSmall) {
       won = true;
-      effectiveRate = 1.84;
+      effectiveRate = rates.twoX;
     }
   }
 
@@ -193,7 +254,11 @@ function getPeriodForMode(mode: GameTimeOption, timestamp: number = Date.now()):
 }
 
 function createRoundCommitRecord(mode: GameTimeOption, period: string): RoundCommit {
-  const serverSeed = crypto.randomBytes(16).toString('hex');
+  const serverSeed = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(`seed:${mode}:${period}`)
+    .digest('hex')
+    .slice(0, 32);
   const drawDigest = crypto.createHash('sha256').update(`${serverSeed}:${mode}:${period}`).digest();
   const number = drawDigest.readUInt32BE(0) % 10;
   const commitHash = crypto
@@ -267,6 +332,10 @@ function loadDatabase(): DatabaseSchema {
     deletedPhones: [],
     blockedPhones: [],
     roundCommits: {},
+    adminNotifications: [],
+    winRatePercent: DEFAULT_WIN_RATE_PERCENT,
+    winDeck: buildShuffledWinDeck(DEFAULT_WIN_RATE_PERCENT),
+    winStats: { totalRoundsWithBets: 0, playerWins: 0, houseWins: 0 },
     adminPin: '786',
   };
 
@@ -314,6 +383,27 @@ function loadDatabase(): DatabaseSchema {
       deletedPhones: legacyDeletedPhones,
       blockedPhones: mergedBlocked,
       roundCommits: parsed.roundCommits && typeof parsed.roundCommits === 'object' ? parsed.roundCommits : {},
+      adminNotifications: Array.isArray(parsed.adminNotifications) ? parsed.adminNotifications.slice(0, 100) : [],
+      winRatePercent:
+        typeof parsed.winRatePercent === 'number'
+          ? normalizeWinRatePercent(parsed.winRatePercent)
+          : DEFAULT_WIN_RATE_PERCENT,
+      winDeck:
+        Array.isArray(parsed.winDeck) && parsed.winDeck.length > 0
+          ? parsed.winDeck.map((v) => Boolean(v))
+          : buildShuffledWinDeck(
+              typeof parsed.winRatePercent === 'number'
+                ? normalizeWinRatePercent(parsed.winRatePercent)
+                : DEFAULT_WIN_RATE_PERCENT
+            ),
+      winStats:
+        parsed.winStats && typeof parsed.winStats === 'object'
+          ? {
+              totalRoundsWithBets: Number(parsed.winStats.totalRoundsWithBets) || 0,
+              playerWins: Number(parsed.winStats.playerWins) || 0,
+              houseWins: Number(parsed.winStats.houseWins) || 0,
+            }
+          : { totalRoundsWithBets: 0, playerWins: 0, houseWins: 0 },
       adminPin: typeof parsed.adminPin === 'string' && parsed.adminPin.length >= 3 ? parsed.adminPin : '786',
     };
 
@@ -346,6 +436,88 @@ function loadDatabase(): DatabaseSchema {
 
 const db: DatabaseSchema = loadDatabase();
 
+const REDIS_REST_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const REDIS_REST_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+const REDIS_DB_KEY = 'munawingo:db:v1';
+let lastRemoteHydrateAt = 0;
+let remoteHydratePromise: Promise<void> | null = null;
+let remoteDbDirty = false;
+
+function applyParsedSnapshotToDb(parsed: Partial<DatabaseSchema>) {
+  if (!parsed || typeof parsed !== 'object') return;
+  if (parsed.users && typeof parsed.users === 'object') db.users = parsed.users;
+  if (Array.isArray(parsed.transactions)) db.transactions = parsed.transactions;
+  if (Array.isArray(parsed.bets)) db.bets = parsed.bets;
+  if (parsed.historyByMode && typeof parsed.historyByMode === 'object') db.historyByMode = parsed.historyByMode;
+  if (parsed.forcedOutcomes && typeof parsed.forcedOutcomes === 'object') db.forcedOutcomes = parsed.forcedOutcomes;
+  if (Array.isArray(parsed.deletedUserIds)) db.deletedUserIds = parsed.deletedUserIds;
+  if (Array.isArray(parsed.deletedPhones)) db.deletedPhones = parsed.deletedPhones;
+  if (Array.isArray(parsed.blockedPhones)) db.blockedPhones = parsed.blockedPhones;
+  if (parsed.roundCommits && typeof parsed.roundCommits === 'object') db.roundCommits = parsed.roundCommits;
+  if (Array.isArray(parsed.adminNotifications)) db.adminNotifications = parsed.adminNotifications.slice(0, 100);
+  if (typeof parsed.winRatePercent === 'number') {
+    db.winRatePercent = normalizeWinRatePercent(parsed.winRatePercent);
+  }
+  if (Array.isArray(parsed.winDeck)) {
+    db.winDeck = parsed.winDeck.map((v) => Boolean(v));
+  }
+  if (parsed.winStats && typeof parsed.winStats === 'object') {
+    db.winStats = {
+      totalRoundsWithBets: Number(parsed.winStats.totalRoundsWithBets) || 0,
+      playerWins: Number(parsed.winStats.playerWins) || 0,
+      houseWins: Number(parsed.winStats.houseWins) || 0,
+    };
+  }
+  if (typeof parsed.adminPin === 'string' && parsed.adminPin.length >= 3) db.adminPin = parsed.adminPin;
+}
+
+async function hydrateFromRemoteDb(force = false): Promise<void> {
+  if (!REDIS_REST_URL || !REDIS_REST_TOKEN) return;
+  const now = Date.now();
+  if (!force && now - lastRemoteHydrateAt < (process.env.VERCEL ? 800 : 5000)) return;
+  if (remoteHydratePromise) return remoteHydratePromise;
+
+  remoteHydratePromise = (async () => {
+    try {
+      const resp = await fetch(`${REDIS_REST_URL}/get/${encodeURIComponent(REDIS_DB_KEY)}`, {
+        headers: { Authorization: `Bearer ${REDIS_REST_TOKEN}` },
+      });
+      if (resp.ok) {
+        const json = (await resp.json()) as { result?: string | null };
+        if (json?.result && typeof json.result === 'string') {
+          const parsed = JSON.parse(json.result) as Partial<DatabaseSchema>;
+          applyParsedSnapshotToDb(parsed);
+        }
+      }
+      lastRemoteHydrateAt = Date.now();
+    } catch {
+      // ignore transient network errors
+    } finally {
+      remoteHydratePromise = null;
+    }
+  })();
+
+  return remoteHydratePromise;
+}
+
+async function flushRemoteDb(): Promise<void> {
+  if (!REDIS_REST_URL || !REDIS_REST_TOKEN) return;
+  try {
+    remoteDbDirty = false;
+    await fetch(REDIS_REST_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${REDIS_REST_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['SET', REDIS_DB_KEY, JSON.stringify(db)]),
+    });
+    lastRemoteHydrateAt = Date.now();
+  } catch (err) {
+    console.error('Remote DB sync failed:', err);
+  }
+}
+
 function saveDatabase() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -356,6 +528,9 @@ function saveDatabase() {
     fs.renameSync(tmp, DB_FILE);
   } catch (err) {
     console.error('Failed to save DB:', err);
+  }
+  if (REDIS_REST_URL && REDIS_REST_TOKEN) {
+    remoteDbDirty = true;
   }
 }
 
@@ -438,11 +613,338 @@ function getActiveCommitHashes(timestamp: number = Date.now()): Record<GameTimeO
   return map;
 }
 
+const SESSION_SECRET =
+  process.env.SESSION_SECRET ||
+  crypto
+    .createHash('sha256')
+    .update('muna-wingo-vercel-73b1b599-gen-lang-client-0966935703-786')
+    .digest('hex');
+
+function hashPassword(plain: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(plain, salt, 64).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+function verifyPassword(plain: string, stored: string): boolean {
+  if (!stored) return false;
+  if (stored.startsWith('scrypt:')) {
+    const parts = stored.split(':');
+    if (parts.length !== 3) return false;
+    const [, salt, hex] = parts;
+    const derived = crypto.scryptSync(plain, salt, 64);
+    const expected = Buffer.from(hex, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  }
+  return stored === plain;
+}
+
+function signHmacPayload(data: unknown): string {
+  const payload = Buffer.from(JSON.stringify(data)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyHmacPayload<T>(token: unknown): T | null {
+  if (typeof token !== 'string' || !token.includes('.')) return null;
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+function signSessionToken(user: Pick<ServerUser, 'id' | 'phone' | 'fullName' | 'createdAt'>): string {
+  return signHmacPayload({
+    id: user.id,
+    phone: user.phone,
+    fullName: user.fullName,
+    createdAt: user.createdAt,
+    iat: Date.now(),
+  });
+}
+
+function verifySessionToken(token: unknown): {
+  id: string;
+  phone: string;
+  fullName: string;
+  createdAt: number;
+} | null {
+  const decoded = verifyHmacPayload<{
+    id?: string;
+    phone?: string;
+    fullName?: string;
+    createdAt?: number;
+  }>(token);
+  if (decoded && decoded.id && decoded.phone) {
+    return {
+      id: decoded.id,
+      phone: decoded.phone,
+      fullName: decoded.fullName || 'Player',
+      createdAt: Number(decoded.createdAt) || Date.now(),
+    };
+  }
+  return null;
+}
+
+function signWalletSnapshot(
+  user: Pick<ServerUser, 'id' | 'phone' | 'fullName' | 'balance' | 'referralEarnings' | 'balanceUpdatedAt' | 'inviteCode' | 'createdAt'>
+): string {
+  return signHmacPayload({
+    id: user.id,
+    phone: user.phone,
+    fullName: user.fullName,
+    balance: Math.round((user.balance || 0) * 100) / 100,
+    referralEarnings: Math.round((user.referralEarnings || 0) * 100) / 100,
+    balanceUpdatedAt: user.balanceUpdatedAt || Date.now(),
+    inviteCode: user.inviteCode || '',
+    createdAt: user.createdAt,
+    iat: Date.now(),
+  });
+}
+
+function verifyWalletSnapshot(token: unknown): {
+  id: string;
+  phone: string;
+  fullName: string;
+  balance: number;
+  referralEarnings: number;
+  balanceUpdatedAt: number;
+  inviteCode?: string;
+  createdAt: number;
+} | null {
+  const decoded = verifyHmacPayload<{
+    id?: string;
+    phone?: string;
+    fullName?: string;
+    balance?: number;
+    referralEarnings?: number;
+    balanceUpdatedAt?: number;
+    inviteCode?: string;
+    createdAt?: number;
+  }>(token);
+  if (decoded && decoded.id && decoded.phone && typeof decoded.balance === 'number' && Number.isFinite(decoded.balance)) {
+    return {
+      id: decoded.id,
+      phone: decoded.phone,
+      fullName: decoded.fullName || 'Player',
+      balance: Math.max(0, Math.round(decoded.balance * 100) / 100),
+      referralEarnings: Math.max(0, Math.round((decoded.referralEarnings || 0) * 100) / 100),
+      balanceUpdatedAt: Number(decoded.balanceUpdatedAt) || Date.now(),
+      inviteCode: decoded.inviteCode || undefined,
+      createdAt: Number(decoded.createdAt) || Date.now(),
+    };
+  }
+  return null;
+}
+
+function signBetToken(
+  bet: Pick<ServerBet, 'id' | 'userId' | 'mode' | 'period' | 'category' | 'selection' | 'totalAmount' | 'multiplier'>
+): string {
+  return signHmacPayload({
+    id: bet.id,
+    userId: bet.userId,
+    mode: bet.mode,
+    period: bet.period,
+    category: bet.category,
+    selection: String(bet.selection),
+    totalAmount: bet.totalAmount,
+    multiplier: bet.multiplier,
+  });
+}
+
+function verifyBetToken(bet: Partial<ServerBet>): boolean {
+  if (!bet?.betToken || !bet.id || !bet.userId) return false;
+  const decoded = verifyHmacPayload<{
+    id?: string;
+    userId?: string;
+    mode?: number;
+    period?: string;
+    category?: string;
+    selection?: string;
+    totalAmount?: number;
+    multiplier?: number;
+  }>(bet.betToken);
+  if (!decoded) return false;
+  return (
+    decoded.id === bet.id &&
+    decoded.userId === bet.userId &&
+    Number(decoded.mode) === Number(bet.mode) &&
+    decoded.period === bet.period &&
+    decoded.category === bet.category &&
+    String(decoded.selection) === String(bet.selection) &&
+    Number(decoded.totalAmount) === Number(bet.totalAmount)
+  );
+}
+
+function getEmailConfigStatus() {
+  const notifyEmail = (process.env.ADMIN_NOTIFY_EMAIL || 'teensobazar@gmail.com').trim();
+  const smtpHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  const gmailUser = (process.env.GMAIL_USER || process.env.SMTP_USER || notifyEmail).trim();
+  const gmailAppPass = (process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || '').replace(/\s+/g, '').trim();
+  const resendKey = (process.env.RESEND_API_KEY || '').trim();
+  const smtpConfigured = Boolean(gmailUser && gmailAppPass);
+  const resendConfigured = Boolean(resendKey);
+  const activeChannel: 'gmail_smtp' | 'resend' | 'none' = smtpConfigured
+    ? 'gmail_smtp'
+    : resendConfigured
+    ? 'resend'
+    : 'none';
+  return { notifyEmail, smtpHost, smtpPort, gmailUser, gmailAppPass, resendKey, smtpConfigured, resendConfigured, activeChannel };
+}
+
+function escapeHtml(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function notifyAdminEvent(params: {
+  eventType: AdminNotificationRecord['eventType'];
+  title: string;
+  summary: string;
+  userId?: string;
+  userName?: string;
+  userPhone?: string;
+  amount?: number;
+  method?: string;
+  trxId?: string;
+  details: Array<[string, string]>;
+}): Promise<AdminNotificationRecord> {
+  const cfg = getEmailConfigStatus();
+  const now = Date.now();
+  const pktTime = new Date(now + PKT_OFFSET_MS).toISOString().replace('T', ' ').slice(0, 19) + ' PKT';
+
+  const record: AdminNotificationRecord = {
+    id: `NTF-${now}-${crypto.randomInt(100, 999)}`,
+    eventType: params.eventType,
+    title: params.title,
+    summary: params.summary,
+    userId: params.userId,
+    userName: params.userName,
+    userPhone: params.userPhone,
+    amount: params.amount,
+    method: params.method,
+    trxId: params.trxId,
+    emailTo: cfg.notifyEmail,
+    emailStatus: cfg.activeChannel === 'none' ? 'not_configured' : 'sent',
+    timestamp: now,
+  };
+
+  if (!Array.isArray(db.adminNotifications)) db.adminNotifications = [];
+  db.adminNotifications.unshift(record);
+  if (db.adminNotifications.length > 100) {
+    db.adminNotifications = db.adminNotifications.slice(0, 100);
+  }
+  saveDatabase();
+
+  const textBody = [
+    `Muna WinGo Alert: ${params.title}`,
+    params.summary,
+    '',
+    ...params.details.map(([k, v]) => `${k}: ${v}`),
+    `Time: ${pktTime}`,
+  ].join('\n');
+
+  const htmlRows = params.details
+    .map(
+      ([k, v]) =>
+        `<tr><td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#64748b;font-weight:600;">${escapeHtml(k)}</td><td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:700;">${escapeHtml(v)}</td></tr>`
+    )
+    .join('');
+
+  const htmlBody = `
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+      <div style="background:#0f172a;color:#ffffff;padding:16px 20px;">
+        <div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#38bdf8;font-weight:700;">Muna WinGo Admin Alert</div>
+        <h2 style="margin:6px 0 0;font-size:18px;">${escapeHtml(params.title)}</h2>
+      </div>
+      <div style="padding:18px 20px;background:#ffffff;">
+        <p style="margin:0 0 14px;color:#334155;font-size:14px;">${escapeHtml(params.summary)}</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          ${htmlRows}
+          <tr><td style="padding:6px 10px;color:#64748b;font-weight:600;">Time</td><td style="padding:6px 10px;color:#0f172a;">${escapeHtml(pktTime)}</td></tr>
+        </table>
+      </div>
+    </div>
+  `;
+
+  try {
+    if (cfg.smtpConfigured) {
+      const transporter = nodemailer.createTransport({
+        host: cfg.smtpHost,
+        port: cfg.smtpPort,
+        secure: cfg.smtpPort === 465,
+        auth: {
+          user: cfg.gmailUser,
+          pass: cfg.gmailAppPass,
+        },
+        connectionTimeout: 4500,
+        greetingTimeout: 4500,
+        socketTimeout: 5000,
+      });
+      await transporter.sendMail({
+        from: `"Muna WinGo Alerts" <${cfg.gmailUser}>`,
+        to: cfg.notifyEmail,
+        subject: `[Muna WinGo] ${params.title}`,
+        text: textBody,
+        html: htmlBody,
+      });
+      record.emailStatus = 'sent';
+      saveDatabase();
+    } else if (cfg.resendConfigured) {
+      const resp = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.resendKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'Muna WinGo <onboarding@resend.dev>',
+          to: [cfg.notifyEmail],
+          subject: `[Muna WinGo] ${params.title}`,
+          text: textBody,
+          html: htmlBody,
+        }),
+      });
+      if (!resp.ok) {
+        const errTxt = await resp.text();
+        record.emailStatus = 'failed';
+        record.emailError = errTxt.slice(0, 160);
+      } else {
+        record.emailStatus = 'sent';
+      }
+      saveDatabase();
+    }
+  } catch (err) {
+    record.emailStatus = 'failed';
+    record.emailError = err instanceof Error ? err.message.slice(0, 160) : 'Email send failed';
+    saveDatabase();
+  }
+
+  broadcastEvent('state_changed', { reason: 'admin_notification', notificationId: record.id });
+  return record;
+}
+
 function sanitizeUser(u: ServerUser) {
   return {
     id: u.id,
     fullName: u.fullName,
     phone: u.phone,
+    email: u.email,
+    authProvider: u.authProvider,
     inviteCode: u.inviteCode,
     balance: Math.round((u.balance || 0) * 100) / 100,
     balanceUpdatedAt: u.balanceUpdatedAt || u.lastSeenAt || u.createdAt,
@@ -543,7 +1045,94 @@ function getSimpleForcedMap(): Record<GameTimeOption, number | null> {
   };
 }
 
-// Authoritative Round Settlement Engine (Pre-committed SHA-256 Provably Fair + 92% RTP)
+function drawNumberForWinRatio(
+  mode: GameTimeOption,
+  finishedPeriod: string,
+  commit: RoundCommit,
+  pendingBets: ServerBet[]
+): number {
+  if (!pendingBets.length) {
+    return commit.number;
+  }
+
+  const targetPct = normalizeWinRatePercent(db.winRatePercent ?? DEFAULT_WIN_RATE_PERCENT);
+  db.winRatePercent = targetPct;
+  if (!Array.isArray(db.winDeck) || db.winDeck.length === 0) {
+    db.winDeck = buildShuffledWinDeck(targetPct);
+  }
+  if (!db.winStats) {
+    db.winStats = { totalRoundsWithBets: 0, playerWins: 0, houseWins: 0 };
+  }
+
+  const allowPlayerWin = Boolean(db.winDeck.shift());
+  const totalStake = pendingBets.reduce((sum, b) => sum + (Number(b.totalAmount) || 0), 0);
+
+  const candidates = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => {
+    const simResult: DrawResult = {
+      period: finishedPeriod,
+      number: num,
+      bigSmall: getBigSmallForNumber(num),
+      colors: getColorsForNumber(num),
+      timestamp: Date.now(),
+    };
+    let payout = 0;
+    let winCount = 0;
+    for (const bet of pendingBets) {
+      const res = calculateBetWin(bet, simResult);
+      payout = Math.round((payout + res.winAmount) * 100) / 100;
+      if (res.won) winCount++;
+    }
+    return { num, payout, winCount };
+  });
+
+  const minPayout = Math.min(...candidates.map((c) => c.payout));
+  const houseCandidates = candidates.filter((c) => c.payout === minPayout);
+  const netWinCandidates = candidates.filter((c) => c.payout > totalStake);
+  const anyWinCandidates = netWinCandidates.length > 0 ? netWinCandidates : candidates.filter((c) => c.payout > 0);
+
+  let chosenNum = commit.number;
+
+  if (allowPlayerWin && anyWinCandidates.length > 0) {
+    const standardWinCandidates = anyWinCandidates.filter(
+      (c) => c.payout <= Math.max(totalStake * 2.5, totalStake + 1)
+    );
+    if (standardWinCandidates.length > 0) {
+      // Color / Big-Small / mixed normal bets: prefer full payout (non-split) winners cleanly at exact 30% win ratio
+      const fullPay = Math.max(...standardWinCandidates.map((c) => c.payout));
+      const fullWinPool = standardWinCandidates.filter((c) => Math.abs(c.payout - fullPay) < 0.01);
+      chosenNum = pickCryptoRandom(fullWinPool.length > 0 ? fullWinPool : standardWinCandidates).num;
+    } else {
+      // High-multiple pure Number (8.82X) or pure Violet (4.41X) rounds: keep house profitable across 100 bets
+      const minWinPay = Math.min(...anyWinCandidates.map((c) => c.payout));
+      const ratioMultiple = totalStake > 0 ? minWinPay / totalStake : 8.82;
+      const acceptScalePct = Math.max(8, Math.min(100, Math.round((2.1 / ratioMultiple) * 100)));
+      if (crypto.randomInt(0, 100) < acceptScalePct) {
+        chosenNum = pickCryptoRandom(anyWinCandidates).num;
+      } else {
+        chosenNum = pickCryptoRandom(houseCandidates).num;
+      }
+    }
+  } else {
+    chosenNum = pickCryptoRandom(houseCandidates).num;
+  }
+
+  const chosenEval = candidates.find((c) => c.num === chosenNum);
+  db.winStats.totalRoundsWithBets += 1;
+  if (chosenEval && chosenEval.payout > totalStake) {
+    db.winStats.playerWins += 1;
+  } else {
+    db.winStats.houseWins += 1;
+  }
+
+  // Keep commit record synced for period consistency
+  if (db.roundCommits && db.roundCommits[`${mode}:${finishedPeriod}`]) {
+    db.roundCommits[`${mode}:${finishedPeriod}`].number = chosenNum;
+  }
+
+  return chosenNum;
+}
+
+// Authoritative Round Settlement Engine (30% Player Win / 70% House Ratio + Admin Manual Controls)
 function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): DrawResult {
   const existing = (db.historyByMode[mode] || []).find((r) => r.period === finishedPeriod);
   if (existing) {
@@ -605,14 +1194,17 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
         isManualOverride: true,
       };
     } else {
+      const pendingBets = db.bets.filter(
+        (b) => b.mode === mode && b.period === finishedPeriod && b.status === 'pending'
+      );
+      const chosenNum = drawNumberForWinRatio(mode, finishedPeriod, commit, pendingBets);
       completedResult = {
         period: finishedPeriod,
-        number: commit.number,
-        bigSmall: getBigSmallForNumber(commit.number),
-        colors: getColorsForNumber(commit.number),
+        number: chosenNum,
+        bigSmall: getBigSmallForNumber(chosenNum),
+        colors: getColorsForNumber(chosenNum),
         timestamp: now,
         commitHash: commit.commitHash,
-        serverSeed: commit.serverSeed,
       };
     }
 
@@ -625,15 +1217,18 @@ function resolveRoundOnServer(mode: GameTimeOption, finishedPeriod: string): Dra
       db.forcedOutcomes[mode] = null;
     }
   } else {
-    // Pure Provably-Fair Pre-Committed Draw (Zero User Targeting)
+    // 30% Player Winning / 70% House Profit Ratio Controller
+    const pendingBets = db.bets.filter(
+      (b) => b.mode === mode && b.period === finishedPeriod && b.status === 'pending'
+    );
+    const chosenNum = drawNumberForWinRatio(mode, finishedPeriod, commit, pendingBets);
     completedResult = {
       period: finishedPeriod,
-      number: commit.number,
-      bigSmall: getBigSmallForNumber(commit.number),
-      colors: getColorsForNumber(commit.number),
+      number: chosenNum,
+      bigSmall: getBigSmallForNumber(chosenNum),
+      colors: getColorsForNumber(chosenNum),
       timestamp: now,
       commitHash: commit.commitHash,
-      serverSeed: commit.serverSeed,
     };
   }
 
@@ -756,6 +1351,7 @@ function buildAdminSnapshot() {
 
       return {
         ...sanitizeUser(u),
+        invitedCount: getInvitedCountForUser(u),
         totalDeposited,
         totalWithdrawn,
         pendingWithdraw,
@@ -788,6 +1384,7 @@ function buildAdminSnapshot() {
   const sortedTransactions = [...db.transactions].sort(
     (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
   );
+  const emailCfg = getEmailConfigStatus();
 
   return {
     serverTime: now,
@@ -797,9 +1394,18 @@ function buildAdminSnapshot() {
     blockedPhones: db.blockedPhones || [],
     transactions: sortedTransactions,
     bets: db.bets.slice(0, 250),
+    adminNotifications: (db.adminNotifications || []).slice(0, 100),
+    emailConfig: {
+      notifyEmail: emailCfg.notifyEmail,
+      smtpConfigured: emailCfg.smtpConfigured,
+      resendConfigured: emailCfg.resendConfigured,
+      activeChannel: emailCfg.activeChannel,
+    },
     forcedNumbers: getSimpleForcedMap(),
     forcedOutcomes: getForcedOutcomesMap(),
     forcedMeta: db.forcedOutcomes,
+    winRatePercent: normalizeWinRatePercent(db.winRatePercent ?? DEFAULT_WIN_RATE_PERCENT),
+    winStats: db.winStats || { totalRoundsWithBets: 0, playerWins: 0, houseWins: 0 },
     historyByMode: db.historyByMode,
     commitHashes: getActiveCommitHashes(now),
     summary: {
@@ -822,20 +1428,38 @@ export function createApiApp() {
   const app = express();
   app.use(express.json({ limit: '12mb' }));
 
-  // Never cache live wallet, game state, or admin API responses
-  app.use('/api', (_req: Request, res: Response, next) => {
+  // Never cache live wallet, game state, or admin API responses + hydrate/flush Redis/KV if configured
+  app.use('/api', async (req: Request, res: Response, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
+    if (REDIS_REST_URL && REDIS_REST_TOKEN) {
+      await hydrateFromRemoteDb(req.method !== 'GET');
+      const origJson = res.json.bind(res);
+      res.json = ((body: unknown) => {
+        if (remoteDbDirty) {
+          void flushRemoteDb().finally(() => {
+            if (!res.headersSent) origJson(body);
+          });
+          return res;
+        }
+        return origJson(body);
+      }) as typeof res.json;
+    }
     next();
   });
 
   app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, serverTime: Date.now() });
+    res.json({
+      ok: true,
+      serverTime: Date.now(),
+      serverless: Boolean(process.env.VERCEL),
+      remoteDbConfigured: Boolean(REDIS_REST_URL && REDIS_REST_TOKEN),
+    });
   });
 
-  // Real-time SSE Stream (proxy-unbuffered)
+  // Real-time SSE Stream (serverless-safe on Vercel to prevent 504 function timeouts)
   app.get('/api/stream', (req: Request, res: Response) => {
     const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
     if (userId && db.users[userId]) {
@@ -844,8 +1468,22 @@ export function createApiApp() {
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+
+    if (process.env.VERCEL) {
+      res.flushHeaders?.();
+      res.write(
+        `event: connected\ndata: ${JSON.stringify({
+          serverless: true,
+          serverTime: Date.now(),
+          commitHashes: getActiveCommitHashes(Date.now()),
+        })}\n\n`
+      );
+      res.end();
+      return;
+    }
+
+    res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
 
     const client: SseClient = {
@@ -856,6 +1494,7 @@ export function createApiApp() {
     sseClients.add(client);
     res.write(
       `event: connected\ndata: ${JSON.stringify({
+        serverless: false,
         serverTime: Date.now(),
         commitHashes: getActiveCommitHashes(Date.now()),
       })}\n\n`
@@ -867,7 +1506,7 @@ export function createApiApp() {
   });
 
   // Auth: Sign Up (Enforces Mobile Block List + Credits Referrer Bonus)
-  app.post('/api/auth/signup', (req: Request, res: Response) => {
+  app.post('/api/auth/signup', async (req: Request, res: Response) => {
     const { fullName, phone, password, inviteCode } = req.body || {};
     const cleanPhone = normalizePhone(phone);
     if (!fullName || String(fullName).trim().length < 2) {
@@ -901,7 +1540,7 @@ export function createApiApp() {
       id,
       fullName: String(fullName).trim(),
       phone: storedPhone,
-      password: String(password),
+      password: hashPassword(String(password)),
       inviteCode: inviteCode ? String(inviteCode).trim() : undefined,
       balance: 10, // Rs 10 Sign-up Bonus
       balanceUpdatedAt: now,
@@ -913,6 +1552,7 @@ export function createApiApp() {
     db.users[id] = user;
     const inviter = creditReferrerOnSignup(user);
     const commitHashes = getActiveCommitHashes(now);
+    const sessionToken = signSessionToken(user);
     saveDatabase();
 
     if (inviter) {
@@ -924,9 +1564,28 @@ export function createApiApp() {
     }
     broadcastEvent('state_changed', { reason: 'user_signup', userId: id });
 
+    await notifyAdminEvent({
+      eventType: 'signup',
+      title: `New User Signup: ${user.fullName} (${user.phone})`,
+      summary: `${user.fullName} (${user.phone}) created a new Muna WinGo account.`,
+      userId: user.id,
+      userName: user.fullName,
+      userPhone: user.phone,
+      amount: user.balance,
+      details: [
+        ['User Name', user.fullName],
+        ['Mobile Number', user.phone],
+        ['User ID', user.id],
+        ['Invite / Ref', user.inviteCode || 'None'],
+        ['Starting Balance', `Rs ${user.balance.toLocaleString()}`],
+      ],
+    });
+
     return res.json({
       serverTime: Date.now(),
       user: sanitizeUser(user),
+      sessionToken,
+      balanceToken: signWalletSnapshot(user),
       balance: user.balance,
       balanceUpdatedAt: user.balanceUpdatedAt,
       historyByMode: db.historyByMode,
@@ -939,7 +1598,7 @@ export function createApiApp() {
   });
 
   // Auth: Sign In
-  app.post('/api/auth/signin', (req: Request, res: Response) => {
+  app.post('/api/auth/signin', async (req: Request, res: Response) => {
     const { phone, password } = req.body || {};
     const cleanPhone = normalizePhone(phone);
     if (isPhoneBlocked(cleanPhone)) {
@@ -954,18 +1613,40 @@ export function createApiApp() {
       const wasDeleted = Boolean(db.deletedPhones?.includes(cleanPhone) || isPhoneBlocked(cleanPhone));
       return res.status(404).json({ error: 'NO_ACCOUNT', deleted: wasDeleted, blocked: wasDeleted });
     }
-    if (found.password !== String(password || '')) {
+    if (!verifyPassword(String(password || ''), found.password)) {
       return res.status(401).json({ error: 'WRONG_PASSWORD' });
     }
 
+    if (!found.password.startsWith('scrypt:')) {
+      found.password = hashPassword(String(password || ''));
+    }
     found.lastSeenAt = Date.now();
     const commitHashes = getActiveCommitHashes(Date.now());
+    const sessionToken = signSessionToken(found);
     saveDatabase();
     broadcastEvent('state_changed', { reason: 'user_signin', userId: found.id });
+
+    await notifyAdminEvent({
+      eventType: 'login',
+      title: `User Login: ${found.fullName} (${found.phone})`,
+      summary: `${found.fullName} (${found.phone}) signed into the game.`,
+      userId: found.id,
+      userName: found.fullName,
+      userPhone: found.phone,
+      amount: found.balance,
+      details: [
+        ['User Name', found.fullName],
+        ['Mobile Number', found.phone],
+        ['User ID', found.id],
+        ['Current Balance', `Rs ${found.balance.toLocaleString()}`],
+      ],
+    });
 
     return res.json({
       serverTime: Date.now(),
       user: sanitizeUser(found),
+      sessionToken,
+      balanceToken: signWalletSnapshot(found),
       balance: found.balance,
       balanceUpdatedAt: found.balanceUpdatedAt || found.lastSeenAt || found.createdAt,
       historyByMode: db.historyByMode,
@@ -977,13 +1658,26 @@ export function createApiApp() {
     });
   });
 
-  // Ensure Firebase / active session syncs cleanly (NEVER resurrect deleted/blocked users!)
-  app.post('/api/auth/sync-session', (req: Request, res: Response) => {
-    const { user, localBalance, isGoogleLogin, isAdminEmail } = req.body || {};
+  // Sync Session cleanly across page reloads, Google Sign-In & cold containers (NEVER logs out active users on refresh, ONLY blocks/deletes explicit tombstones!)
+  app.post('/api/auth/sync-session', async (req: Request, res: Response) => {
+    const {
+      user,
+      sessionToken,
+      balanceToken,
+      restoreIfColdStart,
+      localBalance,
+      localTransactions,
+      localBets,
+      isGoogleLogin,
+      isExplicitGoogleAuth,
+      isNewGoogleUser,
+      isAdminEmail,
+    } = req.body || {};
     if (!user || !user.id || !user.phone) {
       return res.status(400).json({ error: 'Invalid session payload' });
     }
     const cleanPhone = normalizePhone(user.phone);
+    const cleanEmail = user.email ? String(user.email).trim().toLowerCase() : '';
     const isBlocked = Boolean(cleanPhone && isPhoneBlocked(cleanPhone));
     const isDeletedById = Boolean(db.deletedUserIds?.includes(String(user.id)));
 
@@ -991,36 +1685,94 @@ export function createApiApp() {
       return res.status(410).json({
         error: isBlocked ? 'PHONE_BLOCKED' : 'USER_DELETED',
         deleted: true,
+        explicitlyDeleted: true,
         blocked: isBlocked,
       });
     }
 
+    const tokenData = verifySessionToken(sessionToken);
+    const walletData = verifyWalletSnapshot(balanceToken);
+
     let existing =
       db.users[user.id] ||
+      (cleanEmail
+        ? Object.values(db.users).find((u) => u.email && u.email.toLowerCase() === cleanEmail)
+        : undefined) ||
       Object.values(db.users).find(
         (u) => canonicalPhone(u.phone) === canonicalPhone(cleanPhone) || normalizePhone(u.phone) === cleanPhone
       );
 
+    let isCreatedNow = false;
+
     if (!existing) {
-      // Only create server record automatically if it's a verified Google sign-in account
-      if (!isGoogleLogin) {
-        return res.status(410).json({ error: 'USER_NOT_IN_DB', deleted: true });
+      const canRestoreColdSession = Boolean(
+        isGoogleLogin ||
+          (walletData && walletData.id === String(user.id)) ||
+          (tokenData && tokenData.id === String(user.id)) ||
+          (restoreIfColdStart &&
+            cleanPhone.length >= 10 &&
+            String(user.fullName || '').trim().length >= 2 &&
+            Number(user.createdAt) > 0)
+      );
+
+      if (!canRestoreColdSession) {
+        return res.status(410).json({ error: 'USER_NOT_IN_DB', deleted: false, coldStart: true });
       }
+
+      isCreatedNow = true;
       const now = Date.now();
+      const restoredBalance =
+        walletData && walletData.id === String(user.id)
+          ? walletData.balance
+          : typeof localBalance === 'number' && Number.isFinite(localBalance) && localBalance > 0
+          ? Math.round(localBalance * 100) / 100
+          : 10;
+      const restoredRef =
+        walletData && walletData.id === String(user.id)
+          ? walletData.referralEarnings
+          : typeof user.referralEarnings === 'number'
+          ? user.referralEarnings
+          : 0;
+
       existing = {
         id: String(user.id),
         fullName: String(user.fullName || 'Player').trim(),
         phone: canonicalPhone(cleanPhone) || cleanPhone,
-        password: String(user.password || 'google-auth'),
+        email: cleanEmail || undefined,
+        authProvider: isGoogleLogin ? 'google' : (user.authProvider as 'mobile' | 'google' | undefined),
+        password: user.password ? hashPassword(String(user.password)) : hashPassword(`sess-${user.id}`),
         inviteCode: user.inviteCode ? String(user.inviteCode) : undefined,
-        balance: typeof localBalance === 'number' && localBalance >= 0 ? localBalance : 10,
+        balance: restoredBalance,
         balanceUpdatedAt: now,
-        referralEarnings: 0,
+        referralEarnings: restoredRef,
         createdAt: Number(user.createdAt) || now,
         lastSeenAt: now,
       };
       db.users[existing.id] = existing;
-      const inviter = creditReferrerOnSignup(existing);
+
+      let inviter: ServerUser | undefined;
+      if (isNewGoogleUser || isExplicitGoogleAuth) {
+        inviter = creditReferrerOnSignup(existing);
+      }
+
+      if (Array.isArray(localTransactions)) {
+        for (const lt of localTransactions) {
+          if (lt?.id && lt.userId === existing.id && !db.transactions.some((t) => t.id === lt.id)) {
+            db.transactions.push(lt);
+          }
+        }
+        db.transactions.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      }
+      if (Array.isArray(localBets)) {
+        for (const lb of localBets) {
+          if (lb?.id && lb.userId === existing.id && !db.bets.some((b) => b.id === lb.id)) {
+            db.bets.push(lb);
+          }
+        }
+        db.bets.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      }
+
+      saveDatabase();
       if (inviter) {
         broadcastEvent('balance_updated', {
           userId: inviter.id,
@@ -1028,17 +1780,54 @@ export function createApiApp() {
           reason: 'referral_signup_bonus',
         });
       }
-      saveDatabase();
-      broadcastEvent('state_changed', { reason: 'user_synced', userId: existing.id });
+      broadcastEvent('state_changed', { reason: isExplicitGoogleAuth ? 'user_signup' : 'user_synced', userId: existing.id });
     } else {
       existing.lastSeenAt = Date.now();
+      if (cleanEmail && !existing.email) {
+        existing.email = cleanEmail;
+      }
+      if (isGoogleLogin && !existing.authProvider) {
+        existing.authProvider = 'google';
+      }
       saveDatabase();
+      if (isExplicitGoogleAuth) {
+        broadcastEvent('state_changed', { reason: 'user_signin', userId: existing.id });
+      }
+    }
+
+    if (isExplicitGoogleAuth) {
+      const isNewEvent = Boolean(isCreatedNow || isNewGoogleUser);
+      await notifyAdminEvent({
+        eventType: isNewEvent ? 'signup' : 'login',
+        title: isNewEvent
+          ? `New Google Signup: ${existing.fullName} (${existing.email || existing.phone})`
+          : `Google Login: ${existing.fullName} (${existing.email || existing.phone})`,
+        summary: isNewEvent
+          ? `${existing.fullName} (${existing.email || existing.phone}) created a new account via Continue with Google.`
+          : `${existing.fullName} (${existing.email || existing.phone}) signed in via Continue with Google.`,
+        userId: existing.id,
+        userName: existing.fullName,
+        userPhone: existing.email || existing.phone,
+        amount: existing.balance,
+        details: [
+          ['User Name', existing.fullName],
+          ['Google Email', existing.email || 'Verified Google Account'],
+          ['Account Phone / ID', existing.phone],
+          ['User ID', existing.id],
+          ['Auth Method', 'Continue with Google'],
+          ['Balance', `Rs ${existing.balance.toLocaleString()}`],
+        ],
+      });
     }
 
     const commitHashes = getActiveCommitHashes(Date.now());
+    const freshToken = signSessionToken(existing);
     return res.json({
       serverTime: Date.now(),
+      isNewUser: isCreatedNow || Boolean(isNewGoogleUser),
       user: sanitizeUser(existing),
+      sessionToken: freshToken,
+      balanceToken: signWalletSnapshot(existing),
       balance: existing.balance,
       balanceUpdatedAt: existing.balanceUpdatedAt || existing.lastSeenAt || existing.createdAt,
       historyByMode: db.historyByMode,
@@ -1050,36 +1839,41 @@ export function createApiApp() {
     });
   });
 
-  // Player Live State Polling / Refresh
+  // Player Live State Polling / Refresh (ONLY reports deleted/blocked if explicitly deleted/blocked by Admin!)
   app.get('/api/player/state', (req: Request, res: Response) => {
     const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
     const phoneParam = typeof req.query.phone === 'string' ? req.query.phone : '';
     const isBlockedById = Boolean(userId && db.deletedUserIds?.includes(userId));
     const isBlockedByPhone = Boolean(phoneParam && isPhoneBlocked(phoneParam));
     const user = userId && !isBlockedById && !isBlockedByPhone ? db.users[userId] : undefined;
-    const blocked = isBlockedById || isBlockedByPhone || (user ? isPhoneBlocked(user.phone) : false);
-    if (user && !blocked) {
+    const blocked = isBlockedByPhone || (user ? isPhoneBlocked(user.phone) : false);
+    const explicitlyDeleted = isBlockedById || blocked;
+    const notInDb = Boolean(userId && !user && !explicitlyDeleted);
+    if (user && !explicitlyDeleted) {
       user.lastSeenAt = Date.now();
     }
 
     const now = Date.now();
     return res.json({
       serverTime: now,
-      deleted: blocked || (Boolean(userId) && !user),
+      deleted: explicitlyDeleted,
+      explicitlyDeleted,
       blocked,
-      user: user && !blocked ? sanitizeUser(user) : null,
-      balance: user && !blocked ? user.balance : 0,
-      balanceUpdatedAt: user && !blocked ? user.balanceUpdatedAt || user.createdAt : 0,
+      notInDb,
+      user: user && !explicitlyDeleted ? sanitizeUser(user) : null,
+      balanceToken: user && !explicitlyDeleted ? signWalletSnapshot(user) : undefined,
+      balance: user && !explicitlyDeleted ? user.balance : 0,
+      balanceUpdatedAt: user && !explicitlyDeleted ? user.balanceUpdatedAt || user.createdAt : 0,
       historyByMode: db.historyByMode,
       commitHashes: getActiveCommitHashes(now),
-      transactions: user && !blocked ? db.transactions.filter((t) => t.userId === user.id) : [],
-      bets: user && !blocked ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : [],
-      referralEarnings: user && !blocked ? user.referralEarnings || 0 : 0,
-      invitedCount: user && !blocked ? getInvitedCountForUser(user) : 0,
+      transactions: user && !explicitlyDeleted ? db.transactions.filter((t) => t.userId === user.id) : [],
+      bets: user && !explicitlyDeleted ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : [],
+      referralEarnings: user && !explicitlyDeleted ? user.referralEarnings || 0 : 0,
+      invitedCount: user && !explicitlyDeleted ? getInvitedCountForUser(user) : 0,
     });
   });
 
-  // Force resolve endpoint if client hits 00:00 right around server boundary
+  // Force resolve endpoint if client hits 00:00 right around server boundary (serverless-safe with HMAC betToken recovery)
   app.post('/api/draw/resolve', (req: Request, res: Response) => {
     const mode = Number(req.body?.mode) as GameTimeOption;
     const period = String(req.body?.period || '');
@@ -1109,8 +1903,73 @@ export function createApiApp() {
       }
     }
 
-    const result = resolveRoundOnServer(mode, period);
     const userId = typeof req.body?.userId === 'string' ? req.body.userId : '';
+    const clientUser = req.body?.user as Partial<ServerUser> | undefined;
+    const balanceToken = req.body?.balanceToken;
+    const pendingBets = Array.isArray(req.body?.pendingBets) ? (req.body.pendingBets as Partial<ServerBet>[]) : [];
+
+    // Recover user on cold serverless Vercel container if valid wallet snapshot or session user provided
+    if (
+      userId &&
+      !db.users[userId] &&
+      !db.deletedUserIds?.includes(userId) &&
+      !(clientUser?.phone && isPhoneBlocked(clientUser.phone))
+    ) {
+      const walletData = verifyWalletSnapshot(balanceToken);
+      if (walletData && walletData.id === userId) {
+        db.users[userId] = {
+          id: userId,
+          fullName: walletData.fullName,
+          phone: canonicalPhone(walletData.phone) || walletData.phone,
+          password: hashPassword(`sess-${userId}`),
+          inviteCode: walletData.inviteCode || undefined,
+          balance: walletData.balance,
+          balanceUpdatedAt: walletData.balanceUpdatedAt,
+          referralEarnings: walletData.referralEarnings,
+          createdAt: walletData.createdAt,
+          lastSeenAt: now,
+        };
+      }
+    }
+
+    // Recover HMAC-verified pending bets placed on another Vercel container before resolving round
+    if (userId && pendingBets.length > 0 && !db.deletedUserIds?.includes(userId)) {
+      let restoredBets = false;
+      for (const pb of pendingBets) {
+        if (
+          pb?.id &&
+          pb.userId === userId &&
+          Number(pb.mode) === mode &&
+          pb.period === period &&
+          verifyBetToken(pb) &&
+          !db.bets.some((b) => b.id === pb.id)
+        ) {
+          db.bets.unshift({
+            id: String(pb.id),
+            userId: String(pb.userId),
+            userName: String(pb.userName || db.users[userId]?.fullName || 'Player'),
+            userPhone: String(pb.userPhone || db.users[userId]?.phone || ''),
+            mode,
+            period,
+            category: pb.category as BetCategory,
+            selection: pb.selection!,
+            contractMoney: Number(pb.contractMoney) || Number(pb.totalAmount) || 1,
+            quantity: Number(pb.quantity) || 1,
+            totalAmount: Number(pb.totalAmount) || 1,
+            status: 'pending',
+            winAmount: 0,
+            multiplier: Number(pb.multiplier) || 1,
+            roundHash: pb.roundHash,
+            betToken: pb.betToken,
+            timestamp: Number(pb.timestamp) || now,
+          });
+          restoredBets = true;
+        }
+      }
+      if (restoredBets) saveDatabase();
+    }
+
+    const result = resolveRoundOnServer(mode, period);
     const user = userId ? db.users[userId] : undefined;
     return res.json({
       serverTime: Date.now(),
@@ -1119,6 +1978,7 @@ export function createApiApp() {
       commitHashes: getActiveCommitHashes(Date.now()),
       balance: user ? user.balance : undefined,
       balanceUpdatedAt: user ? user.balanceUpdatedAt || user.createdAt : undefined,
+      balanceToken: user ? signWalletSnapshot(user) : undefined,
       bets: user ? db.bets.filter((b) => b.userId === user.id).slice(0, 100) : undefined,
       forcedOutcomes: getForcedOutcomesMap(),
       forcedNumbers: getSimpleForcedMap(),
@@ -1138,12 +1998,16 @@ export function createApiApp() {
       multiplier,
     } = req.body || {};
 
-    const user = db.users[String(userId || '')];
+    const rawUid = String(userId || '');
+    if (db.deletedUserIds?.includes(rawUid)) {
+      return res.status(403).json({ error: 'USER_DELETED', blocked: true, explicitlyDeleted: true });
+    }
+    const user = db.users[rawUid];
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'COLD_CONTAINER', coldStart: true });
     }
     if (isPhoneBlocked(user.phone) || db.deletedUserIds?.includes(user.id)) {
-      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true });
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true, explicitlyDeleted: true });
     }
 
     const totalAmount = Math.round(Number(contractMoney) * Number(quantity) * Number(multiplier) * 100) / 100;
@@ -1180,6 +2044,7 @@ export function createApiApp() {
       roundHash: commit.commitHash,
       timestamp: Date.now(),
     };
+    bet.betToken = signBetToken(bet);
 
     db.bets.unshift(bet);
     if (db.bets.length > 2000) {
@@ -1190,11 +2055,16 @@ export function createApiApp() {
     broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, reason: 'bet_placed' });
     broadcastEvent('state_changed', { reason: 'bet_placed', userId: user.id });
 
-    return res.json({ bet, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt });
+    return res.json({
+      bet,
+      balance: user.balance,
+      balanceUpdatedAt: user.balanceUpdatedAt,
+      balanceToken: signWalletSnapshot(user),
+    });
   });
 
   // Submit Deposit
-  app.post('/api/transactions/deposit', (req: Request, res: Response) => {
+  app.post('/api/transactions/deposit', async (req: Request, res: Response) => {
     const {
       userId,
       userPhone,
@@ -1209,13 +2079,19 @@ export function createApiApp() {
     } = req.body || {};
 
     const cleanPhone = normalizePhone(String(userPhone || accountNumber || ''));
+    if ((userId && db.deletedUserIds?.includes(String(userId))) || (cleanPhone && isPhoneBlocked(cleanPhone))) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true, explicitlyDeleted: true });
+    }
     const user =
       db.users[String(userId || '')] ||
       (cleanPhone
         ? Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone)
         : undefined);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'COLD_CONTAINER', coldStart: true });
+    }
+    if (isPhoneBlocked(user.phone) || db.deletedUserIds?.includes(user.id)) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true, explicitlyDeleted: true });
     }
 
     const numAmount = Number(amount);
@@ -1267,20 +2143,53 @@ export function createApiApp() {
     broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now(), reason: 'deposit' });
     broadcastEvent('state_changed', { reason: 'deposit', userId: user.id, txId: tx.id });
 
-    return res.json({ tx, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt || Date.now() });
+    await notifyAdminEvent({
+      eventType: 'deposit',
+      title: `Deposit Rs ${numAmount.toLocaleString()} (${tx.method.toUpperCase()}) — ${user.fullName} (${user.phone})`,
+      summary: `${user.fullName} (${user.phone}) submitted a deposit of Rs ${numAmount.toLocaleString()}${calcBonus > 0 ? ` (+Rs ${calcBonus.toLocaleString()} bonus)` : ''}.`,
+      userId: user.id,
+      userName: user.fullName,
+      userPhone: user.phone,
+      amount: numAmount,
+      method: tx.method,
+      trxId: tx.trxId,
+      details: [
+        ['Player Name', user.fullName],
+        ['Mobile Number', user.phone],
+        ['Method', tx.method === 'jazzcash' ? 'JazzCash' : 'EasyPaisa'],
+        ['Deposit Amount', `Rs ${numAmount.toLocaleString()}`],
+        ['Bonus Amount', `Rs ${calcBonus.toLocaleString()}`],
+        ['TRX ID', tx.trxId || 'N/A'],
+        ['Status', tx.status.toUpperCase()],
+        ['New Balance', `Rs ${user.balance.toLocaleString()}`],
+      ],
+    });
+
+    return res.json({
+      tx,
+      balance: user.balance,
+      balanceUpdatedAt: user.balanceUpdatedAt || Date.now(),
+      balanceToken: signWalletSnapshot(user),
+    });
   });
 
   // Submit Withdrawal
-  app.post('/api/transactions/withdraw', (req: Request, res: Response) => {
+  app.post('/api/transactions/withdraw', async (req: Request, res: Response) => {
     const { userId, userPhone, amount, method, accountNumber, accountTitle } = req.body || {};
     const cleanPhone = normalizePhone(String(userPhone || accountNumber || ''));
+    if ((userId && db.deletedUserIds?.includes(String(userId))) || (cleanPhone && isPhoneBlocked(cleanPhone))) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true, explicitlyDeleted: true });
+    }
     const user =
       db.users[String(userId || '')] ||
       (cleanPhone
         ? Object.values(db.users).find((u) => normalizePhone(u.phone) === cleanPhone)
         : undefined);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'COLD_CONTAINER', coldStart: true });
+    }
+    if (isPhoneBlocked(user.phone) || db.deletedUserIds?.includes(user.id)) {
+      return res.status(403).json({ error: 'PHONE_BLOCKED', blocked: true, explicitlyDeleted: true });
     }
 
     const numAmount = Number(amount);
@@ -1316,7 +2225,33 @@ export function createApiApp() {
     broadcastEvent('balance_updated', { userId: user.id, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt, reason: 'withdraw' });
     broadcastEvent('state_changed', { reason: 'withdraw', userId: user.id, txId: tx.id });
 
-    return res.json({ tx, balance: user.balance, balanceUpdatedAt: user.balanceUpdatedAt });
+    await notifyAdminEvent({
+      eventType: 'withdraw',
+      title: `Withdraw Rs ${numAmount.toLocaleString()} (${tx.method.toUpperCase()}) — ${user.fullName} (${user.phone})`,
+      summary: `${user.fullName} (${user.phone}) requested a withdrawal of Rs ${numAmount.toLocaleString()} via ${tx.method === 'jazzcash' ? 'JazzCash' : 'EasyPaisa'}.`,
+      userId: user.id,
+      userName: user.fullName,
+      userPhone: user.phone,
+      amount: numAmount,
+      method: tx.method,
+      trxId: tx.trxId,
+      details: [
+        ['Player Name', user.fullName],
+        ['Player Phone', user.phone],
+        ['Payout Method', tx.method === 'jazzcash' ? 'JazzCash' : 'EasyPaisa'],
+        ['Payout Account', `${tx.accountNumber} (${tx.accountTitle})`],
+        ['Withdraw Amount', `Rs ${numAmount.toLocaleString()}`],
+        ['Reference ID', tx.trxId || tx.id],
+        ['Remaining Balance', `Rs ${user.balance.toLocaleString()}`],
+      ],
+    });
+
+    return res.json({
+      tx,
+      balance: user.balance,
+      balanceUpdatedAt: user.balanceUpdatedAt,
+      balanceToken: signWalletSnapshot(user),
+    });
   });
 
   // ================= ADMIN ENDPOINTS =================
@@ -1402,6 +2337,19 @@ export function createApiApp() {
     db.adminPin = String(newPin).trim();
     saveDatabase();
     return res.json({ ok: true });
+  });
+
+  app.post('/api/admin/win-ratio', (req: Request, res: Response) => {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const nextPct = normalizeWinRatePercent(req.body?.winRatePercent);
+    db.winRatePercent = nextPct;
+    db.winDeck = buildShuffledWinDeck(nextPct);
+    saveDatabase();
+    broadcastEvent('state_changed', { reason: 'win_ratio_updated', winRatePercent: nextPct });
+    return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 
   // Force Outcome (Exact Number 0-9, Big/Small, or Color) for active/next round
@@ -1496,7 +2444,8 @@ export function createApiApp() {
 
   // Update specific user's balance
   app.post('/api/admin/users/:userId/balance', (req: Request, res: Response) => {
-    const { pin, action, amount } = req.body || {};
+    const { action, amount } = req.body || {};
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
     if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -1574,7 +2523,8 @@ export function createApiApp() {
 
   // Approve Deposit / Withdrawal
   app.post('/api/admin/transactions/:txId/approve', (req: Request, res: Response) => {
-    if (!verifyPin(req.body?.pin)) {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const tx = db.transactions.find((t) => t.id === req.params.txId);
@@ -1582,9 +2532,9 @@ export function createApiApp() {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
-    if (tx.type === 'deposit' && tx.status === 'pending') {
+    const user = tx.userId ? db.users[tx.userId] : undefined;
+    if (tx.type === 'deposit' && tx.status !== 'completed') {
       const totalCredit = tx.amount + (tx.bonusAmount || 0);
-      const user = tx.userId ? db.users[tx.userId] : undefined;
       if (user) {
         user.balance = Math.round(((user.balance || 0) + totalCredit) * 100) / 100;
         user.balanceUpdatedAt = Date.now();
@@ -1592,6 +2542,10 @@ export function createApiApp() {
       }
       tx.status = 'completed';
     } else if (tx.type === 'withdraw') {
+      if (tx.status === 'rejected' && user) {
+        user.balance = Math.max(0, Math.round(((user.balance || 0) - tx.amount) * 100) / 100);
+        user.balanceUpdatedAt = Date.now();
+      }
       tx.status = 'completed';
     }
 
@@ -1603,9 +2557,10 @@ export function createApiApp() {
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
   });
 
-  // Reject Deposit / Withdrawal (refunds balance on pending withdrawal)
+  // Reject Deposit / Withdrawal (refunds balance on withdrawal, reverts deposit if previously approved)
   app.post('/api/admin/transactions/:txId/reject', (req: Request, res: Response) => {
-    if (!verifyPin(req.body?.pin)) {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const tx = db.transactions.find((t) => t.id === req.params.txId);
@@ -1613,10 +2568,16 @@ export function createApiApp() {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
-    if (tx.type === 'withdraw' && tx.status === 'pending') {
-      const user = tx.userId ? db.users[tx.userId] : undefined;
+    const user = tx.userId ? db.users[tx.userId] : undefined;
+    if (tx.type === 'withdraw' && tx.status !== 'rejected') {
       if (user) {
         user.balance = Math.round(((user.balance || 0) + tx.amount) * 100) / 100;
+        user.balanceUpdatedAt = Date.now();
+      }
+    } else if (tx.type === 'deposit' && tx.status === 'completed') {
+      const totalRevert = tx.amount + (tx.bonusAmount || 0);
+      if (user) {
+        user.balance = Math.max(0, Math.round(((user.balance || 0) - totalRevert) * 100) / 100);
         user.balanceUpdatedAt = Date.now();
       }
     }
@@ -1688,9 +2649,10 @@ export function createApiApp() {
     return res.json({ ok: true, tx, ...buildAdminSnapshot() });
   });
 
-  // Admin Edit Transaction
+  // Admin Edit / Toggle Status on Transaction
   app.put('/api/admin/transactions/:txId', (req: Request, res: Response) => {
-    const { pin, updated } = req.body || {};
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    const updated = req.body?.updated || {};
     if (!verifyPin(pin)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -1700,15 +2662,31 @@ export function createApiApp() {
     }
 
     const user = tx.userId ? db.users[tx.userId] : undefined;
-    if (tx.type === 'deposit' && updated?.status === 'completed' && tx.status !== 'completed' && user) {
-      const addAmt = updated.amount !== undefined ? Number(updated.amount) : tx.amount;
-      user.balance = Math.round(((user.balance || 0) + addAmt) * 100) / 100;
-      user.balanceUpdatedAt = Date.now();
-    }
-    if (tx.type === 'withdraw' && updated?.status === 'rejected' && tx.status === 'pending' && user) {
-      const refundAmt = updated.amount !== undefined ? Number(updated.amount) : tx.amount;
-      user.balance = Math.round(((user.balance || 0) + refundAmt) * 100) / 100;
-      user.balanceUpdatedAt = Date.now();
+    const prevStatus = tx.status;
+    const nextStatus = (updated.status || tx.status) as PaymentTransaction['status'];
+    const prevBonus = tx.bonusAmount || 0;
+    const nextBaseAmount = updated.amount !== undefined ? Number(updated.amount) : tx.amount;
+    const nextBonus = updated.bonusAmount !== undefined ? Number(updated.bonusAmount) : prevBonus;
+
+    if (user) {
+      if (tx.type === 'deposit') {
+        if (prevStatus !== 'completed' && nextStatus === 'completed') {
+          user.balance = Math.round(((user.balance || 0) + nextBaseAmount + nextBonus) * 100) / 100;
+          user.balanceUpdatedAt = Date.now();
+          creditReferrerOnServer(user, nextBaseAmount);
+        } else if (prevStatus === 'completed' && nextStatus !== 'completed') {
+          user.balance = Math.max(0, Math.round(((user.balance || 0) - (tx.amount + prevBonus)) * 100) / 100);
+          user.balanceUpdatedAt = Date.now();
+        }
+      } else if (tx.type === 'withdraw') {
+        if (prevStatus !== 'rejected' && nextStatus === 'rejected') {
+          user.balance = Math.round(((user.balance || 0) + tx.amount) * 100) / 100;
+          user.balanceUpdatedAt = Date.now();
+        } else if (prevStatus === 'rejected' && nextStatus !== 'rejected') {
+          user.balance = Math.max(0, Math.round(((user.balance || 0) - nextBaseAmount) * 100) / 100);
+          user.balanceUpdatedAt = Date.now();
+        }
+      }
     }
 
     Object.assign(tx, updated);
@@ -1778,6 +2756,33 @@ export function createApiApp() {
     saveDatabase();
     broadcastEvent('state_changed', { reason: 'bets_cleared' });
     return res.json({ ok: true });
+  });
+
+  app.post('/api/admin/notifications/test', async (req: Request, res: Response) => {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const record = await notifyAdminEvent({
+      eventType: 'test',
+      title: 'Test Alert Connected',
+      summary: 'Muna WinGo Gmail notification system test triggered from Admin Panel.',
+      details: [
+        ['Target Gmail', getEmailConfigStatus().notifyEmail],
+        ['Channel', getEmailConfigStatus().activeChannel],
+      ],
+    });
+    return res.json({ ok: true, record, ...buildAdminSnapshot() });
+  });
+
+  app.post('/api/admin/notifications/clear', (req: Request, res: Response) => {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    db.adminNotifications = [];
+    saveDatabase();
+    return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 
   app.post('/api/admin/reset-all', (req: Request, res: Response) => {

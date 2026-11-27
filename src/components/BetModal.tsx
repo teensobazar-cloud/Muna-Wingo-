@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Check, AlertCircle, Lock } from 'lucide-react';
 import { BetCategory } from '../types/game';
 import { soundManager } from '../utils/audio';
-import { getEstimatedReturnAndProfit } from '../utils/gameRules';
+import { getEstimatedReturnAndProfit, getPayoutRatesForStake } from '../utils/gameRules';
 
 interface BetModalProps {
   isOpen: boolean;
@@ -26,7 +26,6 @@ export const BetModal: React.FC<BetModalProps> = ({
   userBalance,
   initialMultiplier,
   isLocked = false,
-  commitHash,
   onConfirmBet,
   onOpenDeposit,
   language
@@ -60,6 +59,7 @@ export const BetModal: React.FC<BetModalProps> = ({
 
   const totalAmount = contractMoney * quantity * multiplier;
   const isInsufficient = totalAmount > userBalance;
+  const rates = getPayoutRatesForStake(totalAmount);
   const { totalReturn: estReturn, netProfit: estProfit } = getEstimatedReturnAndProfit(
     category,
     selection,
@@ -71,25 +71,28 @@ export const BetModal: React.FC<BetModalProps> = ({
   const multiplierOptions = [1, 5, 10, 20, 50, 100];
 
   const getHeaderDetails = () => {
+    const twoXLabel = `${rates.twoX.toFixed(2)}X`;
+    const violetLabel = `${Number(rates.violet.toFixed(2))}X`;
+    const numberLabel = `${rates.number.toFixed(2)}X`;
     if (category === 'color') {
       if (selection === 'green') {
         return {
           title: language === 'ur' ? 'سبز منتخب کریں' : 'Select Green',
           bg: 'bg-[#18b660]',
-          rate: '1.95X (92% Fair RTP)'
+          rate: twoXLabel
         };
       }
       if (selection === 'violet') {
         return {
           title: language === 'ur' ? 'جامنی منتخب کریں' : 'Select Violet',
           bg: 'bg-[#9c27b0]',
-          rate: '4.6X (92% Fair RTP)'
+          rate: violetLabel
         };
       }
       return {
         title: language === 'ur' ? 'سرخ منتخب کریں' : 'Select Red',
         bg: 'bg-[#ea384c]',
-        rate: '1.95X (92% Fair RTP)'
+        rate: twoXLabel
       };
     }
     if (category === 'bigSmall') {
@@ -97,19 +100,19 @@ export const BetModal: React.FC<BetModalProps> = ({
         return {
           title: language === 'ur' ? 'بڑا (Big 5-9)' : 'Select Big',
           bg: 'bg-[#f5a623]',
-          rate: '1.84X (92% Fair RTP)'
+          rate: twoXLabel
         };
       }
       return {
         title: language === 'ur' ? 'چھوٹا (Small 0-4)' : 'Select Small',
         bg: 'bg-[#5dade2]',
-        rate: '1.84X (92% Fair RTP)'
+        rate: twoXLabel
       };
     }
     return {
       title: language === 'ur' ? `نمبر ${selection} منتخب کریں` : `Select Number ${selection}`,
       bg: 'bg-[#ea384c]',
-      rate: '9.2X (92% Fair RTP)'
+      rate: numberLabel
     };
   };
 
@@ -157,13 +160,6 @@ export const BetModal: React.FC<BetModalProps> = ({
               Rs {userBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
             </span>
           </div>
-
-          {commitHash && (
-            <div className="flex items-center justify-between text-[10px] bg-slate-100/90 px-2.5 py-1.5 rounded-xl border border-slate-200 text-slate-600 font-mono">
-              <span className="font-sans font-bold text-emerald-700">Provably Fair SHA-256:</span>
-              <span className="truncate max-w-[190px]">{commitHash}</span>
-            </div>
-          )}
 
           {/* Locked in last 5 seconds alert */}
           {isLocked && (

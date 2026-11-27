@@ -10,7 +10,8 @@ import {
   Palette,
   Share2,
   LogOut,
-  History
+  History,
+  Music
 } from 'lucide-react';
 import { soundManager } from '../utils/audio';
 import { AppTheme } from '../types/game';
@@ -31,6 +32,8 @@ interface HeaderProps {
   language: 'ur' | 'en';
   muted: boolean;
   onToggleMute: () => void;
+  musicEnabled?: boolean;
+  onToggleMusic?: () => void;
   onOpenInvite: () => void;
   onOpenAdmin: () => void;
   onLogout?: () => void;
@@ -51,6 +54,8 @@ export const Header: React.FC<HeaderProps> = ({
   language,
   muted,
   onToggleMute,
+  musicEnabled = true,
+  onToggleMusic,
   onOpenInvite,
   onOpenAdmin,
   onLogout
@@ -133,6 +138,23 @@ export const Header: React.FC<HeaderProps> = ({
               } ring-1 ring-white/60 shadow-xs`}
             />
           </button>
+
+          {/* Background Music Toggle */}
+          {onToggleMusic && (
+            <button
+              onClick={onToggleMusic}
+              className={`relative p-1 hover:bg-white/10 rounded-full transition-colors cursor-pointer ${
+                muted || !musicEnabled ? 'opacity-60' : 'opacity-100'
+              }`}
+              title={musicEnabled ? 'Pause Background Music' : 'Play Background Music'}
+              aria-label="Toggle Background Music"
+            >
+              <Music className={`w-4 h-4 ${musicEnabled && !muted ? 'text-amber-200' : 'text-white/70'}`} />
+              {(!musicEnabled || muted) && (
+                <span className="pointer-events-none absolute inset-x-1 top-1/2 h-[1.5px] -rotate-45 bg-white/85 rounded-full" />
+              )}
+            </button>
+          )}
 
           {/* Speaker Sound Toggle */}
           <button

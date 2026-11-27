@@ -197,7 +197,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete, language
               <span>
                 {language === 'ur'
                   ? '100% محفوظ لاٹری انجن • فوری ایزی پیسہ و جیز کیش'
-                  : '100% Provably Fair Lottery • EasyPaisa & JazzCash'}
+                  : '100% Secure WinGo • EasyPaisa & JazzCash'}
               </span>
             </div>
           </div>

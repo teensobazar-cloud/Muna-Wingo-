@@ -5,6 +5,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   limit,
   onSnapshot,
@@ -13,6 +14,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import { ADMIN_EMAIL, OperationType, auth, db, googleProvider, handleFirestoreError } from '../firebase';
 import {
@@ -101,7 +103,7 @@ export async function ensureAdminDocument(firebaseUser: User): Promise<void> {
   const adminPath = `admins/${uid}`;
   try {
     const adminRef = doc(db, 'admins', uid);
-    const snap = await getDoc(adminRef);
+    const snap = await getDocFromServer(adminRef);
     if (!snap.exists()) {
       await setDoc(adminRef, {
         uid,
@@ -121,6 +123,7 @@ export async function ensureFirebaseUserDocuments(
   user: RegisteredUser;
   balance: number;
   referralEarnings: number;
+  isNewUser: boolean;
 }> {
   const uid = sanitizeFirestoreId(firebaseUser.uid, 'USR');
   const userPath = `users/${uid}`;
@@ -128,7 +131,7 @@ export async function ensureFirebaseUserDocuments(
 
   let existingUserDoc: Record<string, unknown> | null = null;
   try {
-    const snap = await getDoc(doc(db, 'users', uid));
+    const snap = await getDocFromServer(doc(db, 'users', uid));
     if (snap.exists()) {
       existingUserDoc = snap.data();
     }
@@ -136,6 +139,17 @@ export async function ensureFirebaseUserDocuments(
     handleFirestoreError(error, OperationType.GET, userPath);
   }
 
+  let existingPrivateDoc: Record<string, unknown> | null = null;
+  try {
+    const privSnap = await getDocFromServer(doc(db, 'users', uid, 'private', 'info'));
+    if (privSnap.exists()) {
+      existingPrivateDoc = privSnap.data();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, privatePath);
+  }
+
+  const isNewUser = !existingUserDoc;
   const safeName = clampString(
     opts?.fullName || (existingUserDoc?.fullName as string) || firebaseUser.displayName || 'Player',
     80,
@@ -143,7 +157,19 @@ export async function ensureFirebaseUserDocuments(
   );
   const safeInvite = opts?.inviteCode ? clampString(opts.inviteCode, 64) : '';
 
-  if (!existingUserDoc) {
+  let privatePhone = normalizePhoneForSchema(opts?.phone || firebaseUser.phoneNumber, uid);
+  let privateEmail = firebaseUser.email ? clampString(firebaseUser.email, 160) : '';
+
+  if (existingPrivateDoc) {
+    if (typeof existingPrivateDoc.phone === 'string' && existingPrivateDoc.phone.length >= 7) {
+      privatePhone = existingPrivateDoc.phone;
+    }
+    if (!privateEmail && typeof existingPrivateDoc.email === 'string') {
+      privateEmail = existingPrivateDoc.email;
+    }
+  }
+
+  if (!existingUserDoc && !existingPrivateDoc) {
     const createPayload: Record<string, unknown> = {
       uid,
       fullName: safeName,
@@ -156,35 +182,61 @@ export async function ensureFirebaseUserDocuments(
     if (safeInvite) {
       createPayload.inviteCode = safeInvite;
     }
-    try {
-      await setDoc(doc(db, 'users', uid), createPayload);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, userPath);
+    const privPayload: Record<string, unknown> = {
+      uid,
+      phone: privatePhone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    if (privateEmail) {
+      privPayload.email = privateEmail;
     }
-  }
 
-  let privatePhone = normalizePhoneForSchema(opts?.phone, uid);
-  try {
-    const privSnap = await getDoc(doc(db, 'users', uid, 'private', 'info'));
-    if (!privSnap.exists()) {
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'users', uid), createPayload);
+      batch.set(doc(db, 'users', uid, 'private', 'info'), privPayload);
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, privatePath);
+    }
+  } else {
+    if (!existingUserDoc) {
+      const createPayload: Record<string, unknown> = {
+        uid,
+        fullName: safeName,
+        balance: 10,
+        referralEarnings: 0,
+        role: 'player',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (safeInvite) {
+        createPayload.inviteCode = safeInvite;
+      }
+      try {
+        await setDoc(doc(db, 'users', uid), createPayload);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, userPath);
+      }
+    }
+
+    if (!existingPrivateDoc) {
       const privPayload: Record<string, unknown> = {
         uid,
         phone: privatePhone,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
-      if (firebaseUser.email) {
-        privPayload.email = clampString(firebaseUser.email, 160);
+      if (privateEmail) {
+        privPayload.email = privateEmail;
       }
-      await setDoc(doc(db, 'users', uid, 'private', 'info'), privPayload);
-    } else {
-      const privData = privSnap.data();
-      if (typeof privData.phone === 'string' && privData.phone.length >= 7) {
-        privatePhone = privData.phone;
+      try {
+        await setDoc(doc(db, 'users', uid, 'private', 'info'), privPayload);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, privatePath);
       }
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, privatePath);
   }
 
   if (isVerifiedGoogleAdmin(firebaseUser)) {
@@ -202,6 +254,8 @@ export async function ensureFirebaseUserDocuments(
       id: uid,
       fullName: safeName,
       phone: privatePhone,
+      email: privateEmail || undefined,
+      authProvider: 'google',
       inviteCode: (existingUserDoc?.inviteCode as string | undefined) || safeInvite || undefined,
       balance,
       referralEarnings,
@@ -210,6 +264,7 @@ export async function ensureFirebaseUserDocuments(
     },
     balance,
     referralEarnings,
+    isNewUser,
   };
 }
 
@@ -234,46 +289,113 @@ export async function adminUpsertUserToFirestore(user: RegisteredUser): Promise<
   const userPath = `users/${safeUid}`;
   const privPath = `users/${safeUid}/private/info`;
 
+  let snapData: Record<string, unknown> | null = null;
+  let docExists = false;
   try {
-    const snap = await getDoc(doc(db, 'users', safeUid));
-    if (snap.exists()) {
+    const snap = await getDocFromServer(doc(db, 'users', safeUid));
+    docExists = snap.exists();
+    snapData = docExists ? (snap.data() as Record<string, unknown>) : null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, userPath);
+  }
+
+  let privExists = false;
+  try {
+    const privSnap = await getDocFromServer(doc(db, 'users', safeUid, 'private', 'info'));
+    privExists = privSnap.exists();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, privPath);
+  }
+
+  const allowedUserKeys = new Set([
+    'uid',
+    'fullName',
+    'balance',
+    'referralEarnings',
+    'inviteCode',
+    'role',
+    'createdAt',
+    'updatedAt',
+  ]);
+  const hasValidExistingShape =
+    docExists &&
+    snapData !== null &&
+    snapData.uid === safeUid &&
+    snapData.role === 'player' &&
+    snapData.createdAt instanceof Timestamp &&
+    Object.keys(snapData).every((k) => allowedUserKeys.has(k));
+
+  if (docExists && hasValidExistingShape) {
+    try {
       await updateDoc(doc(db, 'users', safeUid), {
         fullName: clampString(user.fullName, 80, 'Player'),
         balance: clampNumber(user.balance ?? 0, 0, 100000000, 0),
         referralEarnings: clampNumber(user.referralEarnings ?? 0, 0, 100000000, 0),
         updatedAt: serverTimestamp(),
       });
-    } else {
-      const payload: Record<string, unknown> = {
-        uid: safeUid,
-        fullName: clampString(user.fullName, 80, 'Player'),
-        balance: clampNumber(user.balance ?? 10, 0, 100000000, 10),
-        referralEarnings: clampNumber(user.referralEarnings ?? 0, 0, 100000000, 0),
-        role: 'player',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (user.inviteCode) {
-        payload.inviteCode = clampString(user.inviteCode, 64);
-      }
-      await setDoc(doc(db, 'users', safeUid), payload);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, userPath);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, userPath);
-  }
 
-  try {
-    const privSnap = await getDoc(doc(db, 'users', safeUid, 'private', 'info'));
-    if (!privSnap.exists()) {
-      await setDoc(doc(db, 'users', safeUid, 'private', 'info'), {
-        uid: safeUid,
-        phone: normalizePhoneForSchema(user.phone, safeUid),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+    if (!privExists) {
+      try {
+        const privPayload: Record<string, unknown> = {
+          uid: safeUid,
+          phone: normalizePhoneForSchema(user.phone, safeUid),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        if (user.email) {
+          privPayload.email = clampString(user.email, 160);
+        }
+        await setDoc(doc(db, 'users', safeUid, 'private', 'info'), privPayload);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, privPath);
+      }
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, privPath);
+  } else {
+    if (docExists) {
+      try {
+        await deleteDoc(doc(db, 'users', safeUid));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, userPath);
+      }
+    }
+    const payload: Record<string, unknown> = {
+      uid: safeUid,
+      fullName: clampString(user.fullName, 80, 'Player'),
+      balance: clampNumber(user.balance ?? 10, 0, 100000000, 10),
+      referralEarnings: clampNumber(user.referralEarnings ?? 0, 0, 100000000, 0),
+      role: 'player',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    const cleanInvite = user.inviteCode ? clampString(user.inviteCode, 64, '') : '';
+    if (cleanInvite) {
+      payload.inviteCode = cleanInvite;
+    }
+
+    try {
+      if (!privExists) {
+        const privPayload: Record<string, unknown> = {
+          uid: safeUid,
+          phone: normalizePhoneForSchema(user.phone, safeUid),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        if (user.email) {
+          privPayload.email = clampString(user.email, 160);
+        }
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'users', safeUid), payload);
+        batch.set(doc(db, 'users', safeUid, 'private', 'info'), privPayload);
+        await batch.commit();
+      } else {
+        await setDoc(doc(db, 'users', safeUid), payload);
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, userPath);
+    }
   }
 }
 
@@ -295,7 +417,12 @@ export async function blockPhoneInFirestore(phone: string): Promise<void> {
   const phoneId = sanitizeFirestoreId(clean, 'PH');
   const path = `blocked_phones/${phoneId}`;
   try {
-    await setDoc(doc(db, 'blocked_phones', phoneId), {
+    const docRef = doc(db, 'blocked_phones', phoneId);
+    const existingSnap = await getDocFromServer(docRef);
+    if (existingSnap.exists()) {
+      return;
+    }
+    await setDoc(docRef, {
       phoneId,
       phone: clean,
       blockedByUid: sanitizeFirestoreId(auth.currentUser.uid, 'ADM'),
@@ -379,7 +506,12 @@ export async function createTransactionInFirestore(
   }
 
   try {
-    await setDoc(doc(db, 'transactions', safeTxId), payload);
+    const txRef = doc(db, 'transactions', safeTxId);
+    const existingSnap = await getDocFromServer(txRef);
+    if (existingSnap.exists()) {
+      return;
+    }
+    await setDoc(txRef, payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -475,7 +607,12 @@ export async function createBetInFirestore(bet: UserBet, ownerUid: string): Prom
   }
 
   try {
-    await setDoc(doc(db, 'bets', safeBetId), payload);
+    const betRef = doc(db, 'bets', safeBetId);
+    const existingSnap = await getDocFromServer(betRef);
+    if (existingSnap.exists()) {
+      return;
+    }
+    await setDoc(betRef, payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
   }
@@ -552,7 +689,7 @@ export async function adminSyncDrawRecordToFirestore(
   const drawPath = `game_modes/${safeModeId}/draws/${safePeriod}`;
 
   try {
-    const modeSnap = await getDoc(modeRef);
+    const modeSnap = await getDocFromServer(modeRef);
     if (!modeSnap.exists()) {
       await setDoc(modeRef, {
         mode,
@@ -562,7 +699,7 @@ export async function adminSyncDrawRecordToFirestore(
       });
     }
     const drawRef = doc(db, 'game_modes', safeModeId, 'draws', safePeriod);
-    const drawSnap = await getDoc(drawRef);
+    const drawSnap = await getDocFromServer(drawRef);
     if (!drawSnap.exists()) {
       const colors = draw.colors?.length ? draw.colors : getColorsForNumber(draw.number);
       const primaryColor = colors.includes('green') ? 'green' : 'red';
@@ -738,10 +875,13 @@ export function subscribeAdminFirestoreState(
           const v = d.data();
           const uid = String(v.uid || d.id);
           let phone = '';
+          let email = '';
           try {
             const privSnap = await getDoc(doc(db, 'users', uid, 'private', 'info'));
             if (privSnap.exists()) {
-              phone = String(privSnap.data().phone || '');
+              const pData = privSnap.data();
+              phone = String(pData.phone || '');
+              email = typeof pData.email === 'string' ? pData.email : '';
             }
           } catch {
             // private info optional if not created yet
@@ -750,6 +890,8 @@ export function subscribeAdminFirestoreState(
             id: uid,
             fullName: String(v.fullName || 'Player'),
             phone: phone || uid,
+            email: email || undefined,
+            authProvider: email ? 'google' : undefined,
             inviteCode: typeof v.inviteCode === 'string' ? v.inviteCode : undefined,
             balance: Number(v.balance || 0),
             referralEarnings: Number(v.referralEarnings || 0),

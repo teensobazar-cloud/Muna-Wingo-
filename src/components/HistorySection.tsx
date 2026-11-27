@@ -134,28 +134,6 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
                       <ColorDot color={item.colors} size="sm" />
                     </div>
                   </div>
-                  {(item.commitHash || item.serverSeed) && (
-                    <div className="mt-1 flex items-center justify-center gap-2 text-[9px] font-mono text-slate-400">
-                      {item.commitHash && (
-                        <span
-                          title={`SHA-256 Hash: ${item.commitHash}`}
-                          onClick={() => navigator.clipboard?.writeText(item.commitHash || '')}
-                          className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 cursor-pointer hover:bg-slate-200"
-                        >
-                          Hash: {item.commitHash.slice(0, 8)}...{item.commitHash.slice(-4)}
-                        </span>
-                      )}
-                      {item.serverSeed && (
-                        <span
-                          title={`Revealed Server Seed: ${item.serverSeed}`}
-                          onClick={() => navigator.clipboard?.writeText(item.serverSeed || '')}
-                          className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 cursor-pointer hover:bg-emerald-100"
-                        >
-                          Seed: {item.serverSeed.slice(0, 8)}...
-                        </span>
-                      )}
-                    </div>
-                  )}
                 </div>
               );
             })}
@@ -331,11 +309,6 @@ export const HistorySection: React.FC<HistorySectionProps> = ({
                       {new Date(bet.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                     </span>
                   </div>
-                  {bet.roundHash && (
-                    <div className="mt-1 text-[9px] font-mono text-slate-400 truncate">
-                      Round Hash: {bet.roundHash.slice(0, 12)}...{bet.roundHash.slice(-6)}
-                    </div>
-                  )}
                 </div>
               ))}
             </div>

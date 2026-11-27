@@ -12,7 +12,6 @@ import {
   DollarSign,
   ArrowUpRight,
   ArrowDownLeft,
-  KeyRound,
   RotateCcw,
   Sparkles,
   Wallet,
@@ -35,7 +34,10 @@ import {
   Check,
   Eye,
   Image as ImageIcon,
-  Clock
+  Clock,
+  Mail,
+  Bell,
+  Send
 } from 'lucide-react';
 import {
   DrawResult,
@@ -44,7 +46,10 @@ import {
   RegisteredUser,
   UserBet,
   AdminSummary,
-  ForcedOutcomeSpec
+  ForcedOutcomeSpec,
+  AdminNotificationRecord,
+  EmailConfigStatus,
+  WinRatioStats
 } from '../types/game';
 import {
   getBigSmallForNumber,
@@ -72,8 +77,15 @@ interface AdminPanelProps {
   adminUsers?: RegisteredUser[];
   blockedPhones?: string[];
   adminSummary?: AdminSummary;
+  adminNotifications?: AdminNotificationRecord[];
+  emailConfig?: EmailConfigStatus;
+  winRatePercent?: number;
+  winStats?: WinRatioStats;
   lastSyncedAt?: number;
   onRefreshAdmin?: () => Promise<void> | void;
+  onUpdateWinRatio?: (pct: number) => Promise<boolean> | void;
+  onTestEmailNotification?: () => Promise<boolean> | void;
+  onClearNotifications?: () => Promise<void> | void;
   onUpdateUserBalance?: (
     userId: string,
     action: 'set' | 'add' | 'deduct' | 'reset',
@@ -147,8 +159,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   adminUsers,
   blockedPhones = [],
   adminSummary,
+  adminNotifications = [],
+  emailConfig,
+  winRatePercent = 30,
+  winStats,
   lastSyncedAt,
   onRefreshAdmin,
+  onUpdateWinRatio,
+  onTestEmailNotification,
+  onClearNotifications,
   onUpdateUserBalance,
   onDeleteUser,
   onUnblockPhone,
@@ -211,9 +230,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     amount?: number;
   } | null>(null);
   const [depositFilter, setDepositFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all');
+  const [withdrawFilter, setWithdrawFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all');
   const [copiedTrxId, setCopiedTrxId] = useState<string | null>(null);
 
   const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
+  const [isTestingEmail, setIsTestingEmail] = useState<boolean>(false);
 
   // Strict DB-only user list (no localStorage resurrection!)
   const registeredUsers: RegisteredUser[] = adminUsers || [];
@@ -243,12 +264,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   }, [isOpen, selectedMode]);
 
   useEffect(() => {
-    if (!selectedBalanceUserId) {
-      if (currentUserId) {
-        setSelectedBalanceUserId(currentUserId);
-      } else if (registeredUsers.length > 0) {
-        setSelectedBalanceUserId(registeredUsers[0].id);
-      }
+    if (registeredUsers.length === 0) return;
+    const exists = registeredUsers.some((u) => u.id === selectedBalanceUserId);
+    if (!selectedBalanceUserId || !exists) {
+      const currentInList = currentUserId
+        ? registeredUsers.find((u) => u.id === currentUserId)
+        : undefined;
+      setSelectedBalanceUserId(currentInList ? currentInList.id : registeredUsers[0].id);
     }
   }, [currentUserId, registeredUsers, selectedBalanceUserId]);
 
@@ -794,14 +816,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   onRefreshAdmin?.();
                   setActiveTab('settings');
                 }}
-                className={`py-2 px-0.5 rounded-xl text-[9px] sm:text-[11px] font-bold transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                className={`relative py-2 px-0.5 rounded-xl text-[9px] sm:text-[11px] font-bold transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${
                   activeTab === 'settings'
                     ? 'bg-slate-700 text-white shadow-md'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
-                <KeyRound className="w-3.5 h-3.5" />
-                <span>{language === 'ur' ? 'سیٹنگز' : 'Settings'}</span>
+                <Mail className="w-3.5 h-3.5" />
+                <span>{language === 'ur' ? 'سیٹنگز/ای میل' : 'Alerts/Pin'}</span>
+                {adminNotifications.length > 0 && (
+                  <span className="absolute top-0.5 right-0.5 min-w-3.5 h-3.5 px-1 rounded-full bg-amber-400 text-slate-950 text-[8px] font-black flex items-center justify-center">
+                    {adminNotifications.length > 99 ? '99' : adminNotifications.length}
+                  </span>
+                )}
               </button>
             </div>
 
@@ -847,6 +874,61 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  {/* WIN RATIO CONTROLLER (100 mein se 30% Winning / 70% House) */}
+                  <div className="bg-slate-800/95 rounded-2xl p-3 border border-emerald-500/30 space-y-2 shadow-md">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5">
+                        <TrendingUp className="w-4 h-4 text-emerald-400" />
+                        <div>
+                          <span className="font-black text-xs text-white block">
+                            Win Ratio Control ({winRatePercent}% Winning / {100 - winRatePercent}% House)
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            Out of 100 rounds, players win ~{winRatePercent}% and House keeps ~{100 - winRatePercent}%
+                          </span>
+                        </div>
+                      </div>
+                      {winStats && winStats.totalRoundsWithBets > 0 && (
+                        <div className="text-right text-[10px] font-mono">
+                          <span className="text-emerald-400 font-bold">{winStats.playerWins} Win</span>
+                          <span className="text-slate-500"> / </span>
+                          <span className="text-amber-300 font-bold">{winStats.houseWins} House</span>
+                          <span className="text-slate-400 ml-1">
+                            ({Math.round((winStats.playerWins / winStats.totalRoundsWithBets) * 100)}%)
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {onUpdateWinRatio && (
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                        {[20, 30, 40, 50].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={async () => {
+                              soundManager.playClick();
+                              const ok = await onUpdateWinRatio(pct);
+                              if (ok) {
+                                showNotice(
+                                  language === 'ur'
+                                    ? `وننگ ریشو ${pct}% سیٹ ہو گیا (100 میں سے ${pct} ون)`
+                                    : `Win Ratio updated to ${pct}% (${pct} wins per 100)`
+                                );
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                              winRatePercent === pct
+                                ? 'bg-emerald-500 text-slate-950 shadow'
+                                : 'bg-slate-900 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                            }`}
+                          >
+                            {pct}% Win {pct === 30 ? '★' : ''}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* LIVE BET SUMMARY CARD (BIG vs SMALL & COLORS) */}
@@ -1545,8 +1627,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                         </span>
                                       )}
                                     </div>
-                                    <div className="text-[10px] text-slate-400 font-mono">
-                                      {user.id} • {user.phone}
+                                    <div className="text-[10px] text-slate-400 font-mono truncate">
+                                      {user.id} • {user.phone}{user.email ? ` • ${user.email}` : ''}
                                     </div>
                                   </div>
                                 </div>
@@ -1560,7 +1642,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               </div>
 
                               {/* Per-User Financial Ledger Row */}
-                              <div className="grid grid-cols-3 gap-1.5 bg-slate-900/80 rounded-xl p-2 text-[10px] font-mono border border-slate-700/60">
+                              <div className="grid grid-cols-4 gap-1.5 bg-slate-900/80 rounded-xl p-2 text-[10px] font-mono border border-slate-700/60">
                                 <div>
                                   <span className="text-slate-400 block">Deposited:</span>
                                   <span className="text-emerald-400 font-bold">
@@ -1568,7 +1650,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-slate-400 block">Withdrawal:</span>
+                                  <span className="text-slate-400 block">Withdrawn:</span>
                                   <span className="text-orange-400 font-bold">
                                     -Rs {uWth.toLocaleString()}
                                   </span>
@@ -1576,7 +1658,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 <div>
                                   <span className="text-slate-400 block">Bets / Won:</span>
                                   <span className="text-cyan-300 font-bold">
-                                    Rs {(user.totalBet || 0).toLocaleString()} / {(user.totalWon || 0).toLocaleString()}
+                                    {(user.totalBet || 0).toLocaleString()} / {(user.totalWon || 0).toLocaleString()}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block">Ref Bonus:</span>
+                                  <span className="text-amber-300 font-bold">
+                                    Rs {(user.referralEarnings || 0).toLocaleString()} ({user.invitedCount || 0})
                                   </span>
                                 </div>
                               </div>
@@ -1592,7 +1680,47 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                     {user.createdAt ? new Date(user.createdAt).toLocaleString() : 'Registered'}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {onUpdateUserBalance && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          soundManager.playCash();
+                                          await onUpdateUserBalance(user.id, 'add', 100);
+                                          showNotice(`+Rs 100 added to ${user.fullName}`);
+                                        }}
+                                        className="px-1.5 py-1 rounded bg-emerald-700/80 hover:bg-emerald-600 text-white font-mono font-bold text-[10px] cursor-pointer"
+                                        title="Quick Add Rs 100"
+                                      >
+                                        +100
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          soundManager.playCash();
+                                          await onUpdateUserBalance(user.id, 'add', 500);
+                                          showNotice(`+Rs 500 added to ${user.fullName}`);
+                                        }}
+                                        className="px-1.5 py-1 rounded bg-emerald-600/90 hover:bg-emerald-500 text-white font-mono font-bold text-[10px] cursor-pointer"
+                                        title="Quick Add Rs 500"
+                                      >
+                                        +500
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          soundManager.playToom(1);
+                                          await onUpdateUserBalance(user.id, 'deduct', 100);
+                                          showNotice(`-Rs 100 deducted from ${user.fullName}`);
+                                        }}
+                                        className="px-1.5 py-1 rounded bg-orange-700/80 hover:bg-orange-600 text-white font-mono font-bold text-[10px] cursor-pointer"
+                                        title="Quick Deduct Rs 100"
+                                      >
+                                        -100
+                                      </button>
+                                    </>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={() => {
@@ -2096,15 +2224,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                       {tx.method}
                                     </span>
                                     <span
-                                      className={`inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                                      className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase ${
                                         tx.status === 'completed'
-                                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                                           : tx.status === 'pending'
                                           ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
-                                          : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                                       }`}
                                     >
-                                      {tx.status === 'pending' && <Clock className="w-2.5 h-2.5" />}
+                                      {tx.status === 'completed' ? (
+                                        <CheckCircle2 className="w-3 h-3" />
+                                      ) : tx.status === 'pending' ? (
+                                        <Clock className="w-3 h-3" />
+                                      ) : (
+                                        <XCircle className="w-3 h-3" />
+                                      )}
                                       <span>
                                         {tx.status === 'completed'
                                           ? 'Approved'
@@ -2249,31 +2383,68 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   )}
                                 </div>
 
-                                {/* Pending Quick Action Bar */}
-                                {tx.status === 'pending' && (
-                                  <div className="flex gap-2 pt-1.5 border-t border-slate-700/60">
+                                {/* Quick Status Toggle Bar (Pending / Approved / Rejected) */}
+                                <div className="pt-2 border-t border-slate-700/60 flex items-center justify-between gap-2 flex-wrap">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                    {language === 'ur' ? 'فوری اسٹیٹس:' : 'Quick Status:'}
+                                  </span>
+                                  <div className="inline-flex items-center rounded-xl bg-slate-900/90 p-0.5 border border-slate-700 gap-0.5 flex-1 sm:flex-none">
                                     <button
+                                      type="button"
+                                      disabled={tx.status === 'pending'}
                                       onClick={() => {
+                                        if (tx.status === 'pending') return;
+                                        soundManager.playClick();
+                                        onEditDeposit?.(tx.id, { status: 'pending' });
+                                        showNotice(`Deposit marked Pending`);
+                                      }}
+                                      className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                        tx.status === 'pending'
+                                          ? 'bg-amber-500 text-slate-950 shadow-xs cursor-default'
+                                          : 'text-slate-300 hover:bg-amber-500/20 hover:text-amber-300 cursor-pointer'
+                                      }`}
+                                    >
+                                      <Clock className="w-3 h-3" />
+                                      <span>Pending</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={tx.status === 'completed'}
+                                      onClick={() => {
+                                        if (tx.status === 'completed') return;
                                         soundManager.playCash();
                                         onApproveDeposit(tx.id);
+                                        showNotice(`Deposit Approved & Credited!`);
                                       }}
-                                      className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                                      className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                        tx.status === 'completed'
+                                          ? 'bg-emerald-600 text-white shadow-xs cursor-default'
+                                          : 'text-slate-300 hover:bg-emerald-600/25 hover:text-emerald-300 cursor-pointer'
+                                      }`}
                                     >
-                                      <CheckCircle2 className="w-4 h-4" />
-                                      <span>Approve &amp; Credit</span>
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      <span>Approved</span>
                                     </button>
                                     <button
+                                      type="button"
+                                      disabled={tx.status === 'rejected'}
                                       onClick={() => {
+                                        if (tx.status === 'rejected') return;
                                         soundManager.playToom(1);
                                         onRejectDeposit(tx.id);
+                                        showNotice(`Deposit marked Rejected`);
                                       }}
-                                      className="px-3.5 py-2 bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1 cursor-pointer"
+                                      className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                        tx.status === 'rejected'
+                                          ? 'bg-rose-600 text-white shadow-xs cursor-default'
+                                          : 'text-slate-300 hover:bg-rose-600/25 hover:text-rose-300 cursor-pointer'
+                                      }`}
                                     >
-                                      <XCircle className="w-4 h-4" />
-                                      <span>Reject</span>
+                                      <XCircle className="w-3 h-3" />
+                                      <span>Rejected</span>
                                     </button>
                                   </div>
-                                )}
+                                </div>
                               </div>
                             );
                           })
@@ -2643,111 +2814,212 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </div>
                   )}
 
-                  {/* WITHDRAWALS LIST WITH FULL CRUD CONTROLS */}
-                  <div className="space-y-2">
-                    {transactions.filter((t) => t.type === 'withdraw').length === 0 ? (
-                      <p className="text-xs text-slate-500 py-6 text-center">
-                        {language === 'ur' ? 'کوئی وڈرا درخواست نہیں ہے' : 'No withdrawals recorded'}
-                      </p>
-                    ) : (
-                      transactions
-                        .filter((t) => t.type === 'withdraw')
-                        .map((tx) => (
-                          <div
-                            key={tx.id}
-                            className="bg-slate-800 rounded-2xl p-3 border border-slate-700 space-y-2 shadow-xs transition-all hover:border-slate-600"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold text-orange-400 font-digital text-base">
-                                  Rs {tx.amount.toLocaleString()}
-                                </span>
-                                <span className="text-[10px] uppercase font-bold text-slate-400">
-                                  {tx.method}
-                                </span>
-                                <span
-                                  className={`text-[9px] font-bold px-2 py-0.5 rounded-full uppercase ${
-                                    tx.status === 'completed'
-                                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                                      : tx.status === 'pending'
-                                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse'
-                                      : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                                  }`}
-                                >
-                                  {tx.status}
-                                </span>
-                              </div>
+                  {/* WITHDRAWALS LIST WITH STATUS FILTERS, CLEAR BADGES & QUICK STATUS TOGGLE */}
+                  {(() => {
+                    const allWithdraws = transactions
+                      .filter((t) => t.type === 'withdraw')
+                      .sort((a, b) => {
+                        if (a.status === 'pending' && b.status !== 'pending') return -1;
+                        if (b.status === 'pending' && a.status !== 'pending') return 1;
+                        return b.timestamp - a.timestamp;
+                      });
+                    const wthPendingCount = allWithdraws.filter((t) => t.status === 'pending').length;
+                    const wthApprovedCount = allWithdraws.filter((t) => t.status === 'completed').length;
+                    const wthRejectedCount = allWithdraws.filter((t) => t.status === 'rejected').length;
+                    const visibleWithdraws =
+                      withdrawFilter === 'all'
+                        ? allWithdraws
+                        : allWithdraws.filter((t) => t.status === withdrawFilter);
 
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  onClick={() => {
-                                    soundManager.playClick();
-                                    setEditingWithdraw(tx);
-                                    setShowAddWithdrawForm(false);
-                                  }}
-                                  className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 hover:text-white cursor-pointer"
-                                  title="Edit Withdrawal"
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    soundManager.playToom(1);
-                                    onDeleteWithdraw?.(tx.id);
-                                  }}
-                                  className="px-2 py-1 rounded-lg bg-rose-900/80 hover:bg-rose-600 text-rose-200 hover:text-white cursor-pointer transition-all border border-rose-700/60 flex items-center gap-1 text-[11px] font-bold active:scale-95"
-                                  title="Delete Withdrawal"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  <span>{language === 'ur' ? 'ڈیلیٹ' : 'Delete'}</span>
-                                </button>
-                              </div>
-                            </div>
+                    return (
+                      <div className="space-y-2.5">
+                        {/* Status Filter Tabs */}
+                        <div className="grid grid-cols-4 gap-1.5">
+                          {[
+                            { key: 'all', label: `All (${allWithdraws.length})` },
+                            { key: 'pending', label: `Pending (${wthPendingCount})` },
+                            { key: 'completed', label: `Approved (${wthApprovedCount})` },
+                            { key: 'rejected', label: `Rejected (${wthRejectedCount})` }
+                          ].map((f) => (
+                            <button
+                              key={f.key}
+                              type="button"
+                              onClick={() => {
+                                soundManager.playClick();
+                                setWithdrawFilter(f.key as typeof withdrawFilter);
+                              }}
+                              className={`py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all cursor-pointer border ${
+                                withdrawFilter === f.key
+                                  ? 'bg-orange-600 text-white border-orange-500 shadow-xs'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                              }`}
+                            >
+                              {f.label}
+                            </button>
+                          ))}
+                        </div>
 
-                            <div className="text-xs text-slate-300 font-mono space-y-0.5">
-                              {tx.userName && (
-                                <div className="text-cyan-300 font-sans font-bold">
-                                  Player: {tx.userName} {tx.userPhone ? `(${tx.userPhone})` : ''} {tx.userId ? `[${tx.userId}]` : ''}
+                        {visibleWithdraws.length === 0 ? (
+                          <p className="text-xs text-slate-500 py-6 text-center">
+                            {withdrawFilter === 'all'
+                              ? language === 'ur'
+                                ? 'کوئی وڈرا درخواست نہیں ہے'
+                                : 'No withdrawals recorded'
+                              : `No ${withdrawFilter === 'completed' ? 'approved' : withdrawFilter} withdrawals`}
+                          </p>
+                        ) : (
+                          visibleWithdraws.map((tx) => (
+                            <div
+                              key={tx.id}
+                              className={`bg-slate-800 rounded-2xl p-3 border space-y-2 shadow-xs transition-all ${
+                                tx.status === 'pending'
+                                  ? 'border-amber-500/70 ring-1 ring-amber-500/20'
+                                  : 'border-slate-700 hover:border-slate-600'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-orange-400 font-digital text-base">
+                                    Rs {tx.amount.toLocaleString()}
+                                  </span>
+                                  <span className="text-[10px] uppercase font-bold text-slate-400">
+                                    {tx.method}
+                                  </span>
+                                  <span
+                                    className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase ${
+                                      tx.status === 'completed'
+                                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                        : tx.status === 'pending'
+                                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
+                                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                    }`}
+                                  >
+                                    {tx.status === 'completed' ? (
+                                      <CheckCircle2 className="w-3 h-3" />
+                                    ) : tx.status === 'pending' ? (
+                                      <Clock className="w-3 h-3" />
+                                    ) : (
+                                      <XCircle className="w-3 h-3" />
+                                    )}
+                                    <span>
+                                      {tx.status === 'completed'
+                                        ? 'Approved'
+                                        : tx.status === 'pending'
+                                        ? 'Pending'
+                                        : 'Rejected'}
+                                    </span>
+                                  </span>
                                 </div>
-                              )}
-                              <div>Title: {tx.accountTitle}</div>
-                              <div>Number: {tx.accountNumber} ({tx.method})</div>
-                              <div className="flex items-center justify-between">
-                                <span>TRX: {tx.trxId}</span>
-                                <span className="text-[10px] text-slate-400">{new Date(tx.timestamp).toLocaleString()}</span>
+
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      soundManager.playClick();
+                                      setEditingWithdraw(tx);
+                                      setShowAddWithdrawForm(false);
+                                    }}
+                                    className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-amber-300 hover:text-white cursor-pointer"
+                                    title="Edit Withdrawal"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      soundManager.playToom(1);
+                                      onDeleteWithdraw?.(tx.id);
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-rose-900/80 hover:bg-rose-600 text-rose-200 hover:text-white cursor-pointer transition-all border border-rose-700/60 flex items-center gap-1 text-[11px] font-bold active:scale-95"
+                                    title="Delete Withdrawal"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{language === 'ur' ? 'ڈیلیٹ' : 'Delete'}</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="text-xs text-slate-300 font-mono space-y-0.5">
+                                {tx.userName && (
+                                  <div className="text-cyan-300 font-sans font-bold">
+                                    Player: {tx.userName} {tx.userPhone ? `(${tx.userPhone})` : ''} {tx.userId ? `[${tx.userId}]` : ''}
+                                  </div>
+                                )}
+                                <div>Title: {tx.accountTitle}</div>
+                                <div>Number: {tx.accountNumber} ({tx.method})</div>
+                                <div className="flex items-center justify-between">
+                                  <span>TRX: {tx.trxId}</span>
+                                  <span className="text-[10px] text-slate-400">{new Date(tx.timestamp).toLocaleString()}</span>
+                                </div>
+                              </div>
+
+                              {/* Quick Status Toggle Bar (Pending / Approved / Rejected) */}
+                              <div className="pt-2 border-t border-slate-700/60 flex items-center justify-between gap-2 flex-wrap">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                  {language === 'ur' ? 'فوری اسٹیٹس:' : 'Quick Status:'}
+                                </span>
+                                <div className="inline-flex items-center rounded-xl bg-slate-900/90 p-0.5 border border-slate-700 gap-0.5 flex-1 sm:flex-none">
+                                  <button
+                                    type="button"
+                                    disabled={tx.status === 'pending'}
+                                    onClick={() => {
+                                      if (tx.status === 'pending') return;
+                                      soundManager.playClick();
+                                      onEditWithdraw?.(tx.id, { status: 'pending' });
+                                      showNotice(`Withdrawal marked Pending`);
+                                    }}
+                                    className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                      tx.status === 'pending'
+                                        ? 'bg-amber-500 text-slate-950 shadow-xs cursor-default'
+                                        : 'text-slate-300 hover:bg-amber-500/20 hover:text-amber-300 cursor-pointer'
+                                    }`}
+                                  >
+                                    <Clock className="w-3 h-3" />
+                                    <span>Pending</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={tx.status === 'completed'}
+                                    onClick={() => {
+                                      if (tx.status === 'completed') return;
+                                      soundManager.playCash();
+                                      onApproveWithdraw(tx.id);
+                                      showNotice(`Withdrawal Approved & Marked Paid!`);
+                                    }}
+                                    className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                      tx.status === 'completed'
+                                        ? 'bg-emerald-600 text-white shadow-xs cursor-default'
+                                        : 'text-slate-300 hover:bg-emerald-600/25 hover:text-emerald-300 cursor-pointer'
+                                    }`}
+                                  >
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>Approved</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={tx.status === 'rejected'}
+                                    onClick={() => {
+                                      if (tx.status === 'rejected') return;
+                                      soundManager.playToom(1);
+                                      onRejectWithdraw(tx.id);
+                                      showNotice(`Withdrawal Rejected & Refunded!`);
+                                    }}
+                                    className={`flex-1 sm:flex-none px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                      tx.status === 'rejected'
+                                        ? 'bg-rose-600 text-white shadow-xs cursor-default'
+                                        : 'text-slate-300 hover:bg-rose-600/25 hover:text-rose-300 cursor-pointer'
+                                    }`}
+                                  >
+                                    <XCircle className="w-3 h-3" />
+                                    <span>Rejected</span>
+                                  </button>
+                                </div>
                               </div>
                             </div>
-
-                            {/* Pending Quick Action Bar */}
-                            {tx.status === 'pending' && (
-                              <div className="flex gap-2 pt-1 border-t border-slate-700/60">
-                                <button
-                                  onClick={() => {
-                                    soundManager.playCash();
-                                    onApproveWithdraw(tx.id);
-                                  }}
-                                  className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                                >
-                                  <CheckCircle2 className="w-4 h-4" />
-                                  <span>{language === 'ur' ? 'منظور کریں (Approve Paid)' : 'Approve & Mark Paid'}</span>
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    soundManager.playToom(1);
-                                    onRejectWithdraw(tx.id);
-                                  }}
-                                  className="px-3.5 py-1.5 bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1 cursor-pointer"
-                                >
-                                  <XCircle className="w-4 h-4" />
-                                  <span>{language === 'ur' ? 'مسترد و واپس بیلنس' : 'Reject & Refund'}</span>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        ))
-                    )}
-                  </div>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -2949,9 +3221,187 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 );
               })()}
 
-              {/* TAB 6: SETTINGS & MASTER PIN */}
+              {/* TAB 6: GMAIL NOTIFICATIONS, SETTINGS & MASTER PIN */}
               {activeTab === 'settings' && (
                 <div className="space-y-4 animate-in fade-in">
+                  {/* Live Gmail Notification Status & Feed */}
+                  <div className="bg-slate-800/90 p-4 rounded-2xl border border-amber-500/40 space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                          <Mail className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-black text-white flex items-center gap-1.5">
+                            <span>Gmail Notifications</span>
+                            <span
+                              className={`text-[9px] px-1.5 py-0.5 rounded-full font-mono ${
+                                emailConfig && emailConfig.activeChannel !== 'none'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              }`}
+                            >
+                              {emailConfig?.activeChannel === 'gmail_smtp'
+                                ? 'GMAIL SMTP ACTIVE'
+                                : emailConfig?.activeChannel === 'resend'
+                                ? 'RESEND ACTIVE'
+                                : 'SMTP SETUP NEEDED'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-cyan-300 font-mono">
+                            Target: {emailConfig?.notifyEmail || 'teensobazar@gmail.com'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {onTestEmailNotification && (
+                          <button
+                            type="button"
+                            disabled={isTestingEmail}
+                            onClick={async () => {
+                              soundManager.playClick();
+                              setIsTestingEmail(true);
+                              const sent = await onTestEmailNotification();
+                              setIsTestingEmail(false);
+                              showNotice(
+                                sent
+                                  ? `Test email delivered to ${emailConfig?.notifyEmail || 'teensobazar@gmail.com'}!`
+                                  : 'Test alert logged! Add GMAIL_APP_PASSWORD in Vercel/Secrets to deliver emails to Gmail.',
+                                !sent
+                              );
+                            }}
+                            className="px-2.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-black text-[10px] flex items-center gap-1 cursor-pointer"
+                          >
+                            <Send className="w-3 h-3" />
+                            <span>{isTestingEmail ? 'Sending...' : 'Send Test Email'}</span>
+                          </button>
+                        )}
+                        {adminNotifications.length > 0 && onClearNotifications && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              soundManager.playClick();
+                              await onClearNotifications();
+                              showNotice('Notification log cleared');
+                            }}
+                            className="px-2 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-[10px] font-bold cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {(!emailConfig || emailConfig.activeChannel === 'none') && (
+                      <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-2.5 text-[10px] text-amber-200 leading-relaxed">
+                        Add <span className="font-mono font-bold text-white">GMAIL_USER=&quot;teensobazar@gmail.com&quot;</span> and a Google 16-char App Password as{' '}
+                        <span className="font-mono font-bold text-white">GMAIL_APP_PASSWORD</span> in Vercel Environment Variables to send instant emails to{' '}
+                        <span className="font-mono text-cyan-300">teensobazar@gmail.com</span> on every Signup, Login, Deposit &amp; Withdrawal.
+                      </div>
+                    )}
+
+                    {typeof window !== 'undefined' && 'Notification' in window && (
+                      <div className="flex items-center justify-between gap-2 bg-slate-900/60 border border-slate-700/70 rounded-xl px-2.5 py-2">
+                        <span className="text-[10px] text-slate-300">
+                          Mobile / Browser Instant Popup Alerts (Signup &amp; Deposit)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const perm = await Notification.requestPermission();
+                              showNotice(
+                                perm === 'granted'
+                                  ? 'Mobile/Browser instant notifications enabled!'
+                                  : 'Browser notification permission denied.',
+                                perm !== 'granted'
+                              );
+                            } catch {
+                              showNotice('Notifications not supported in this browser view.', true);
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 font-bold text-[10px] shrink-0 cursor-pointer"
+                        >
+                          🔔 Enable Alerts
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Recent Activity Alert Feed */}
+                    <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                        <Bell className="w-3 h-3 text-amber-400" />
+                        <span>Live Alert History ({adminNotifications.length})</span>
+                      </div>
+                      {adminNotifications.length === 0 ? (
+                        <div className="text-[11px] text-slate-500 py-4 text-center bg-slate-900/60 rounded-xl border border-slate-700/50">
+                          No signup, login, deposit, or withdrawal alerts yet.
+                        </div>
+                      ) : (
+                        adminNotifications.slice(0, 25).map((notif) => {
+                          const badgeColor =
+                            notif.eventType === 'signup'
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                              : notif.eventType === 'login'
+                              ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                              : notif.eventType === 'deposit'
+                              ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                              : notif.eventType === 'withdraw'
+                              ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                              : 'bg-purple-500/20 text-purple-300 border-purple-500/40';
+
+                          const deliveryColor =
+                            notif.emailStatus === 'sent'
+                              ? 'text-emerald-400'
+                              : notif.emailStatus === 'failed'
+                              ? 'text-rose-400'
+                              : 'text-amber-300';
+
+                          return (
+                            <div
+                              key={notif.id}
+                              className="bg-slate-900/80 border border-slate-700/70 rounded-xl p-2.5 text-[11px] space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span
+                                    className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${badgeColor}`}
+                                  >
+                                    {notif.eventType}
+                                  </span>
+                                  <span className="font-bold text-white truncate">{notif.title}</span>
+                                </div>
+                                <span className={`text-[9px] font-mono shrink-0 ${deliveryColor}`}>
+                                  {notif.emailStatus === 'sent'
+                                    ? '✓ Sent to Gmail'
+                                    : notif.emailStatus === 'failed'
+                                    ? '✗ Send Error'
+                                    : '• Queued/Logged'}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-300">{notif.summary}</div>
+                              {notif.emailError && (
+                                <div className="text-[9px] text-rose-400 font-mono break-words">
+                                  {notif.emailError}
+                                  {(notif.emailError.includes('535') || notif.emailError.includes('BadCredentials')) && (
+                                    <span className="block text-amber-300 font-sans mt-0.5">
+                                      Tip: Gmail requires a 16-char Google App Password (myaccount.google.com/apppasswords with 2-Step Verification ON) in GMAIL_APP_PASSWORD — not your normal Gmail password.
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              <div className="text-[9px] text-slate-500 font-mono flex items-center justify-between">
+                                <span>{notif.emailTo}</span>
+                                <span>{new Date(notif.timestamp).toLocaleString()}</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
                   <form onSubmit={handleUpdatePin} className="space-y-2 bg-slate-800/90 p-4 rounded-2xl border border-slate-700">
                     <label className="text-xs font-bold text-slate-200 block">
                       {language === 'ur' ? 'ماسٹر ایڈمن پن کوڈ تبدیل کریں:' : 'Change Master Admin PIN:'}

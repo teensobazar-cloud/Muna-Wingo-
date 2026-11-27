@@ -23,7 +23,10 @@ import {
   AppTheme,
   RegisteredUser,
   AdminSummary,
-  ForcedOutcomeSpec
+  ForcedOutcomeSpec,
+  AdminNotificationRecord,
+  EmailConfigStatus,
+  WinRatioStats
 } from './types/game';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import {
@@ -70,6 +73,11 @@ export default function App() {
   });
   const [language] = useState<'ur' | 'en'>('en');
   const [muted, setMuted] = useState<boolean>(false);
+  const [musicEnabled, setMusicEnabled] = useState<boolean>(() => soundManager.getMusicEnabled());
+
+  useEffect(() => {
+    return soundManager.initBackgroundMusic();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('aloye_wingo_theme', theme);
@@ -113,6 +121,8 @@ export default function App() {
             id: currentUser.id,
             fullName: currentUser.fullName,
             phone: currentUser.phone,
+            email: currentUser.email,
+            authProvider: currentUser.authProvider,
             inviteCode: currentUser.inviteCode,
             createdAt: currentUser.createdAt,
           })
@@ -138,6 +148,7 @@ export default function App() {
   });
 
   const balanceRef = useRef<number>(balance);
+  const transactionsRef = useRef<PaymentTransaction[]>(transactions);
   const lastServerBalanceUpdatedAtRef = useRef<number>(0);
 
   useEffect(() => {
@@ -145,6 +156,7 @@ export default function App() {
   }, [balance]);
 
   useEffect(() => {
+    transactionsRef.current = transactions;
     try {
       localStorage.setItem('aloye_wingo_transactions', JSON.stringify(transactions));
     } catch {
@@ -261,7 +273,12 @@ export default function App() {
   const [adminTransactions, setAdminTransactions] = useState<PaymentTransaction[]>([]);
   const [adminBets, setAdminBets] = useState<UserBet[]>([]);
   const [adminSummary, setAdminSummary] = useState<AdminSummary | undefined>(undefined);
+  const [adminNotifications, setAdminNotifications] = useState<AdminNotificationRecord[]>([]);
+  const [emailConfig, setEmailConfig] = useState<EmailConfigStatus | undefined>(undefined);
+  const [winRatePercent, setWinRatePercent] = useState<number>(30);
+  const [winStats, setWinStats] = useState<WinRatioStats | undefined>(undefined);
   const [lastAdminSyncedAt, setLastAdminSyncedAt] = useState<number>(0);
+  const lastSeenNotifIdRef = useRef<string | null>(null);
   const [referralEarnings, setReferralEarnings] = useState<number>(0);
   const [invitedCount, setInvitedCount] = useState<number>(0);
 
@@ -278,6 +295,7 @@ export default function App() {
   const settledPeriodsRef = useRef<Set<string>>(new Set());
   const playerSyncSeqRef = useRef<number>(0);
   const betInFlightRef = useRef<number>(0);
+  const coldRestorePromiseRef = useRef<Promise<boolean> | null>(null);
   const adminLocalSyncedRef = useRef<boolean>(false);
   const deletedUserIdsRef = useRef<Set<string>>(
     (() => {
@@ -414,6 +432,12 @@ export default function App() {
         (phonesToRemove && phonesToRemove.has(normalizePhoneKey(active.phone))))
     ) {
       void signOutFirebase();
+      try {
+        localStorage.removeItem('muna_session_token');
+        localStorage.removeItem('muna_balance_token');
+      } catch {
+        // ignore
+      }
       currentUserRef.current = null;
       isUserSignedInRef.current = false;
       balanceRef.current = 0;
@@ -453,6 +477,10 @@ export default function App() {
     transactions?: PaymentTransaction[];
     bets?: UserBet[];
     summary?: AdminSummary;
+    adminNotifications?: AdminNotificationRecord[];
+    emailConfig?: EmailConfigStatus;
+    winRatePercent?: number;
+    winStats?: WinRatioStats;
     forcedNumbers?: Record<GameTimeOption, number | null>;
     forcedOutcomes?: Record<GameTimeOption, ForcedOutcomeSpec | null>;
     historyByMode?: Record<GameTimeOption, DrawResult[]>;
@@ -502,6 +530,34 @@ export default function App() {
     if (Array.isArray(data.transactions)) setAdminTransactions(data.transactions);
     if (Array.isArray(data.bets)) setAdminBets(data.bets);
     if (data.summary) setAdminSummary(data.summary);
+    if (Array.isArray(data.adminNotifications)) {
+      const latest = data.adminNotifications[0];
+      if (
+        latest?.id &&
+        lastSeenNotifIdRef.current &&
+        lastSeenNotifIdRef.current !== latest.id &&
+        (latest.eventType === 'signup' || latest.eventType === 'deposit' || latest.eventType === 'withdraw')
+      ) {
+        soundManager.playWin();
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification(latest.title, {
+              body: latest.summary,
+              icon: '/muna-logo-512.png',
+            });
+          } catch {
+            // ignore unsupported notification constructor on certain mobile webviews
+          }
+        }
+      }
+      if (latest?.id) {
+        lastSeenNotifIdRef.current = latest.id;
+      }
+      setAdminNotifications(data.adminNotifications);
+    }
+    if (data.emailConfig) setEmailConfig(data.emailConfig);
+    if (typeof data.winRatePercent === 'number') setWinRatePercent(data.winRatePercent);
+    if (data.winStats) setWinStats(data.winStats);
     applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
     if (data.historyByMode) {
       historyByModeRef.current = data.historyByMode;
@@ -577,6 +633,110 @@ export default function App() {
     return null;
   };
 
+  const syncUserSessionWithServer = (
+    userObj: RegisteredUser,
+    restoreIfColdStart = true
+  ): Promise<boolean> => {
+    if (coldRestorePromiseRef.current) {
+      return coldRestorePromiseRef.current;
+    }
+
+    const promise = (async () => {
+      try {
+        const savedToken = localStorage.getItem('muna_session_token') || '';
+        const savedBalanceToken = localStorage.getItem('muna_balance_token') || '';
+        const res = await fetch('/api/auth/sync-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user: userObj,
+            sessionToken: savedToken,
+            balanceToken: savedBalanceToken,
+            restoreIfColdStart,
+            localBalance: balanceRef.current,
+            localTransactions: transactionsRef.current,
+            localBets: userBetsRef.current,
+            isGoogleLogin: Boolean(
+              firebaseUserRef.current || userObj.authProvider === 'google' || userObj.email
+            ),
+            isAdminEmail: isVerifiedGoogleAdmin(firebaseUserRef.current),
+          }),
+        });
+
+        const body = await res.json().catch(() => null);
+        if (
+          (res.status === 410 || res.status === 403) &&
+          (body?.explicitlyDeleted || body?.blocked)
+        ) {
+          deletedUserIdsRef.current.add(userObj.id);
+          const cp = normalizePhoneKey(userObj.phone);
+          if (cp) deletedPhonesRef.current.add(cp);
+          persistDeletedTombstones();
+          purgeActiveSession(new Set([userObj.id]), cp ? new Set([cp]) : undefined);
+          return false;
+        }
+
+        if (!res.ok || !body) {
+          return false;
+        }
+
+        if (body.sessionToken) {
+          try {
+            localStorage.setItem('muna_session_token', String(body.sessionToken));
+          } catch {
+            // ignore
+          }
+        }
+        if (body.balanceToken) {
+          try {
+            localStorage.setItem('muna_balance_token', String(body.balanceToken));
+          } catch {
+            // ignore
+          }
+        }
+        if (body.user) {
+          deletedUserIdsRef.current.delete(body.user.id);
+          const cp = normalizePhoneKey(body.user.phone);
+          if (cp) deletedPhonesRef.current.delete(cp);
+          persistDeletedTombstones();
+          currentUserRef.current = body.user;
+          setCurrentUser(body.user);
+        }
+        if (typeof body.serverTime === 'number') setServerTimeOffset(body.serverTime);
+        if (body.commitHashes) setCommitHashes((prev) => ({ ...prev, ...body.commitHashes }));
+        if (typeof body.balance === 'number' && betInFlightRef.current === 0) {
+          lastServerBalanceUpdatedAtRef.current =
+            typeof body.balanceUpdatedAt === 'number' ? body.balanceUpdatedAt : Date.now();
+          balanceRef.current = body.balance;
+          setBalance(body.balance);
+        }
+        if (Array.isArray(body.transactions)) setTransactions(body.transactions);
+        if (Array.isArray(body.bets)) {
+          userBetsRef.current = body.bets;
+          setUserBets(body.bets);
+        }
+        if (body.historyByMode) {
+          historyByModeRef.current = body.historyByMode;
+          setHistoryByMode(body.historyByMode);
+        }
+        if (typeof body.referralEarnings === 'number') {
+          setReferralEarnings(body.referralEarnings);
+        }
+        if (typeof body.invitedCount === 'number') {
+          setInvitedCount(body.invitedCount);
+        }
+        return true;
+      } catch {
+        return false;
+      } finally {
+        coldRestorePromiseRef.current = null;
+      }
+    })();
+
+    coldRestorePromiseRef.current = promise;
+    return promise;
+  };
+
   const syncPlayerState = async (userId?: string) => {
     const uid = userId ?? currentUserRef.current?.id;
     const reqSeq = playerSyncSeqRef.current;
@@ -596,13 +756,19 @@ export default function App() {
         setHistoryByMode(data.historyByMode);
       }
 
-      // If this user was deleted or blocked by admin, immediately end their active session
-      if (uid && (data.deleted || data.blocked)) {
+      // Only log out if explicitly deleted or blocked by Admin!
+      if (uid && (data.explicitlyDeleted || data.blocked || data.deleted)) {
         deletedUserIdsRef.current.add(uid);
         const cp = normalizePhoneKey(currentUserRef.current?.phone);
         if (cp) deletedPhonesRef.current.add(cp);
         persistDeletedTombstones();
         purgeActiveSession(new Set([uid]), cp ? new Set([cp]) : undefined);
+        return;
+      }
+
+      // Cold serverless container spun up without user in ephemeral memory -> restore silently!
+      if (uid && data.notInDb && currentUserRef.current && currentUserRef.current.id === uid) {
+        void syncUserSessionWithServer(currentUserRef.current, true);
         return;
       }
 
@@ -612,6 +778,13 @@ export default function App() {
       }
 
       if (uid && data.user) {
+        if (data.balanceToken) {
+          try {
+            localStorage.setItem('muna_balance_token', String(data.balanceToken));
+          } catch {
+            // ignore
+          }
+        }
         if (typeof data.balance === 'number') {
           lastServerBalanceUpdatedAtRef.current =
             typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
@@ -682,50 +855,11 @@ export default function App() {
     }
   };
 
-  // Sync existing session on mount + SSE live real-time stream
+  // Sync existing session on mount + SSE live real-time stream (stays logged in across refresh!)
   useEffect(() => {
     const initialUser = currentUserRef.current;
     if (initialUser) {
-      fetch('/api/auth/sync-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: initialUser }),
-      })
-        .then(async (r) => {
-          const body = await r.json().catch(() => null);
-          if (r.status === 410 || r.status === 403 || body?.deleted || body?.blocked) {
-            deletedUserIdsRef.current.add(initialUser.id);
-            const cp = normalizePhoneKey(initialUser.phone);
-            if (cp) deletedPhonesRef.current.add(cp);
-            persistDeletedTombstones();
-            purgeActiveSession(new Set([initialUser.id]), cp ? new Set([cp]) : undefined);
-            return null;
-          }
-          return r.ok ? body : null;
-        })
-        .then((data) => {
-          if (!data) return;
-          if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
-          if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
-          if (typeof data.balance === 'number') {
-            lastServerBalanceUpdatedAtRef.current =
-              typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
-            balanceRef.current = data.balance;
-            setBalance(data.balance);
-          }
-          if (Array.isArray(data.transactions)) setTransactions(data.transactions);
-          if (Array.isArray(data.bets)) {
-            userBetsRef.current = data.bets;
-            setUserBets(data.bets);
-          }
-          if (data.historyByMode) {
-            historyByModeRef.current = data.historyByMode;
-            setHistoryByMode(data.historyByMode);
-          }
-          if (typeof data.referralEarnings === 'number') setReferralEarnings(data.referralEarnings);
-          if (typeof data.invitedCount === 'number') setInvitedCount(data.invitedCount);
-        })
-        .catch(() => {});
+      void syncUserSessionWithServer(initialUser, true);
     } else {
       syncPlayerState();
     }
@@ -744,6 +878,9 @@ export default function App() {
         const data = JSON.parse((ev as MessageEvent).data);
         if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
         if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
+        if (data.serverless) {
+          es.close();
+        }
       } catch {
         // ignore
       }
@@ -1030,7 +1167,10 @@ export default function App() {
           const cloudIds = new Set<string>();
           const activeCloudUsers: RegisteredUser[] = [];
           for (const cu of cloudUsers) {
-            if (isUserDeletedLocally(cu)) {
+            const isActiveSignedIn =
+              cu.id === firebaseUserRef.current?.uid ||
+              cu.id === currentUserRef.current?.id;
+            if (!isActiveSignedIn && isUserDeletedLocally(cu)) {
               void adminDeleteUserInFirestore(cu.id).catch(() => {});
               continue;
             }
@@ -1178,6 +1318,16 @@ export default function App() {
     let serverBalance: number | undefined;
     let serverBets: UserBet[] | undefined;
 
+    const pendingForRound = userBetsRef.current.filter(
+      (b) => (b.mode || 60) === mode && b.period === finishedPeriod && b.status === 'pending'
+    );
+    let savedBalanceToken = '';
+    try {
+      savedBalanceToken = localStorage.getItem('muna_balance_token') || '';
+    } catch {
+      savedBalanceToken = '';
+    }
+
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const res = await fetch('/api/draw/resolve', {
@@ -1187,6 +1337,9 @@ export default function App() {
             mode,
             period: finishedPeriod,
             userId: currentUserRef.current?.id,
+            user: currentUserRef.current,
+            balanceToken: savedBalanceToken,
+            pendingBets: pendingForRound,
           }),
         });
         if (res.ok) {
@@ -1195,6 +1348,13 @@ export default function App() {
           if (data.commitHashes) setCommitHashes((prev) => ({ ...prev, ...data.commitHashes }));
           if (data.forcedOutcomes || data.forcedNumbers) {
             applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
+          }
+          if (data.balanceToken) {
+            try {
+              localStorage.setItem('muna_balance_token', String(data.balanceToken));
+            } catch {
+              // ignore
+            }
           }
           if (data.pending) {
             await new Promise((r) => setTimeout(r, 450));
@@ -1269,13 +1429,13 @@ export default function App() {
     }
 
     const hadLocalPendingBet = userBetsRef.current.some(
-      (b) => b.mode === mode && b.period === finishedPeriod && b.status === 'pending'
+      (b) => (b.mode || 60) === mode && b.period === finishedPeriod && b.status === 'pending'
     );
     const serverRoundBets = serverBets
-      ? serverBets.filter((b) => b.mode === mode && b.period === finishedPeriod)
+      ? serverBets.filter((b) => (b.mode || 60) === mode && b.period === finishedPeriod)
       : [];
 
-    if (serverBets && (hadLocalPendingBet || serverRoundBets.length > 0)) {
+    if (serverBets && serverRoundBets.length > 0) {
       settledPeriodsRef.current.add(settledKey);
       playerSyncSeqRef.current += 1;
       const settledRoundBets = serverRoundBets;
@@ -1474,8 +1634,14 @@ export default function App() {
             }),
           });
 
-        const res = await postBet();
-        if (res.status === 403 || res.status === 410 || res.status === 404) {
+        let res = await postBet();
+        if (res.status === 404) {
+          const restored = await syncUserSessionWithServer(currentUser, true);
+          if (restored) {
+            res = await postBet();
+          }
+        }
+        if (res.status === 403 || res.status === 410) {
           deletedUserIdsRef.current.add(currentUser.id);
           const cp = normalizePhoneKey(currentUser.phone);
           if (cp) deletedPhonesRef.current.add(cp);
@@ -1488,6 +1654,13 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
+          if (data.balanceToken) {
+            try {
+              localStorage.setItem('muna_balance_token', String(data.balanceToken));
+            } catch {
+              // ignore
+            }
+          }
           if (typeof data.balance === 'number') {
             lastServerBalanceUpdatedAtRef.current =
               typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
@@ -1546,24 +1719,33 @@ export default function App() {
 
     if (currentUser) {
       try {
-        const res = await fetch('/api/transactions/deposit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: currentUser.id,
-            userPhone: currentUser.phone,
-            amount: enrichedTx.amount,
-            bonusAmount: enrichedTx.bonusAmount || 0,
-            method: enrichedTx.method,
-            accountNumber: enrichedTx.accountNumber,
-            trxId: enrichedTx.trxId,
-            screenshotUrl: enrichedTx.screenshotUrl,
-            note: enrichedTx.note,
-            autoCredit: autoCredited,
-          }),
-        });
+        const postDeposit = () =>
+          fetch('/api/transactions/deposit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: currentUser.id,
+              userPhone: currentUser.phone,
+              amount: enrichedTx.amount,
+              bonusAmount: enrichedTx.bonusAmount || 0,
+              method: enrichedTx.method,
+              accountNumber: enrichedTx.accountNumber,
+              trxId: enrichedTx.trxId,
+              screenshotUrl: enrichedTx.screenshotUrl,
+              note: enrichedTx.note,
+              autoCredit: autoCredited,
+            }),
+          });
 
-        if (res.status === 403 || res.status === 404) {
+        let res = await postDeposit();
+        if (res.status === 404) {
+          const restored = await syncUserSessionWithServer(currentUser, true);
+          if (restored) {
+            res = await postDeposit();
+          }
+        }
+
+        if (res.status === 403 || res.status === 410) {
           deletedUserIdsRef.current.add(currentUser.id);
           const cp = normalizePhoneKey(currentUser.phone);
           if (cp) deletedPhonesRef.current.add(cp);
@@ -1575,6 +1757,13 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
+          if (data.balanceToken) {
+            try {
+              localStorage.setItem('muna_balance_token', String(data.balanceToken));
+            } catch {
+              // ignore
+            }
+          }
           if (typeof data.balance === 'number') {
             lastServerBalanceUpdatedAtRef.current =
               typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
@@ -1699,20 +1888,29 @@ export default function App() {
 
     if (currentUser) {
       try {
-        const res = await fetch('/api/transactions/withdraw', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: currentUser.id,
-            userPhone: currentUser.phone,
-            amount,
-            method: tx.method,
-            accountNumber: tx.accountNumber,
-            accountTitle: tx.accountTitle,
-          }),
-        });
+        const postWithdraw = () =>
+          fetch('/api/transactions/withdraw', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: currentUser.id,
+              userPhone: currentUser.phone,
+              amount,
+              method: tx.method,
+              accountNumber: tx.accountNumber,
+              accountTitle: tx.accountTitle,
+            }),
+          });
 
-        if (res.status === 403 || res.status === 404) {
+        let res = await postWithdraw();
+        if (res.status === 404) {
+          const restored = await syncUserSessionWithServer(currentUser, true);
+          if (restored) {
+            res = await postWithdraw();
+          }
+        }
+
+        if (res.status === 403 || res.status === 410) {
           deletedUserIdsRef.current.add(currentUser.id);
           const cp = normalizePhoneKey(currentUser.phone);
           if (cp) deletedPhonesRef.current.add(cp);
@@ -1724,6 +1922,13 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           playerSyncSeqRef.current += 1;
+          if (data.balanceToken) {
+            try {
+              localStorage.setItem('muna_balance_token', String(data.balanceToken));
+            } catch {
+              // ignore
+            }
+          }
           if (typeof data.balance === 'number') {
             lastServerBalanceUpdatedAtRef.current =
               typeof data.balanceUpdatedAt === 'number' ? data.balanceUpdatedAt : Date.now();
@@ -1869,9 +2074,14 @@ export default function App() {
         body: JSON.stringify({ pin: adminPinRef.current, updated }),
       });
       if (res.ok) {
-        applyAdminSnapshot(await res.json());
+        const data = await res.json();
+        applyAdminSnapshot(data);
         if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
           void adminUpdateTransactionInFirestore(txId, updated).catch(() => {});
+          if (data.tx?.userId && Array.isArray(data.users)) {
+            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
+            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
+          }
         }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'ڈپازٹ ریکارڈ کامیابی سے اپ ڈیٹ ہو گیا!' : 'Deposit record updated!');
@@ -1965,9 +2175,14 @@ export default function App() {
         body: JSON.stringify({ pin: adminPinRef.current, updated }),
       });
       if (res.ok) {
-        applyAdminSnapshot(await res.json());
+        const data = await res.json();
+        applyAdminSnapshot(data);
         if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
           void adminUpdateTransactionInFirestore(txId, updated).catch(() => {});
+          if (data.tx?.userId && Array.isArray(data.users)) {
+            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
+            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
+          }
         }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'وڈرا ریکارڈ کامیابی سے اپ ڈیٹ ہو گیا!' : 'Withdrawal record updated!');
@@ -2205,6 +2420,8 @@ export default function App() {
     localStorage.removeItem('aloye_wingo_bets');
     localStorage.removeItem('aloye_wingo_transactions');
     localStorage.removeItem('muna_current_user');
+    localStorage.removeItem('muna_session_token');
+    localStorage.removeItem('muna_balance_token');
     localStorage.removeItem('muna_registered_users');
     localStorage.removeItem('muna_user_balances');
     showToast(language === 'ur' ? 'تمام ڈیٹا، بیلنس اور ہسٹری مکمل ڈیلیٹ ہو گئی!' : 'All users and records reset!');
@@ -2336,6 +2553,23 @@ export default function App() {
               if (typeof serverPayload.invitedCount === 'number') {
                 setInvitedCount(serverPayload.invitedCount);
               }
+              if (serverPayload.sessionToken) {
+                try {
+                  localStorage.setItem('muna_session_token', String(serverPayload.sessionToken));
+                } catch {
+                  // ignore
+                }
+              }
+              if ((serverPayload as { balanceToken?: string }).balanceToken) {
+                try {
+                  localStorage.setItem(
+                    'muna_balance_token',
+                    String((serverPayload as { balanceToken?: string }).balanceToken)
+                  );
+                } catch {
+                  // ignore
+                }
+              }
             } else if (isNewSignup) {
               balanceRef.current = 10;
               setBalance(10);
@@ -2345,6 +2579,7 @@ export default function App() {
             const cp = normalizePhoneKey(user.phone);
             if (cp) deletedPhonesRef.current.delete(cp);
             persistDeletedTombstones();
+            currentUserRef.current = user;
             setCurrentUser(user);
             if (serverPayload?.isGoogleAdmin) {
               isAdminAuthRef.current = true;
@@ -2407,8 +2642,19 @@ export default function App() {
               const next = soundManager.toggleMute();
               setMuted(next);
             }}
+            musicEnabled={musicEnabled}
+            onToggleMusic={() => {
+              const next = soundManager.toggleMusic();
+              setMusicEnabled(next);
+            }}
             onLogout={() => {
               void signOutFirebase();
+              try {
+                localStorage.removeItem('muna_session_token');
+                localStorage.removeItem('muna_balance_token');
+              } catch {
+                // ignore
+              }
               setCurrentUser(null);
               showToast(language === 'ur' ? 'اکاؤنٹ لاگ آؤٹ ہو گیا' : 'Signed out successfully');
             }}
@@ -2676,7 +2922,30 @@ export default function App() {
         adminUsers={adminUsers}
         blockedPhones={blockedPhones}
         adminSummary={adminSummary}
+        adminNotifications={adminNotifications}
+        emailConfig={emailConfig}
+        winRatePercent={winRatePercent}
+        winStats={winStats}
         lastSyncedAt={lastAdminSyncedAt}
+        onUpdateWinRatio={async (pct: number) => {
+          try {
+            const res = await fetch('/api/admin/win-ratio', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-pin': adminPinRef.current || '786',
+              },
+              body: JSON.stringify({ pin: adminPinRef.current || '786', winRatePercent: pct }),
+            });
+            if (res.ok) {
+              applyAdminSnapshot(await res.json());
+              return true;
+            }
+          } catch {
+            // ignore
+          }
+          return false;
+        }}
         onRefreshAdmin={async () => {
           const fresh = await fetchAdminState();
           if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
@@ -2689,6 +2958,43 @@ export default function App() {
               txsToPush,
               Array.from(deletedUserIdsRef.current)
             ).catch(() => {});
+          }
+        }}
+        onTestEmailNotification={async () => {
+          try {
+            const res = await fetch('/api/admin/notifications/test', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-pin': adminPinRef.current || '786',
+              },
+              body: JSON.stringify({ pin: adminPinRef.current || '786' }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              applyAdminSnapshot(data);
+              return Boolean(data.record?.emailStatus === 'sent');
+            }
+          } catch {
+            // ignore
+          }
+          return false;
+        }}
+        onClearNotifications={async () => {
+          try {
+            const res = await fetch('/api/admin/notifications/clear', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-pin': adminPinRef.current || '786',
+              },
+              body: JSON.stringify({ pin: adminPinRef.current || '786' }),
+            });
+            if (res.ok) {
+              applyAdminSnapshot(await res.json());
+            }
+          } catch {
+            // ignore
           }
         }}
         onUpdateUserBalance={handleUpdateUserBalanceOnServer}
@@ -2773,8 +3079,13 @@ export default function App() {
             );
             showToast('Firebase Cloud DB connected live!');
             return true;
-          } catch {
-            showToast('Could not connect Firebase Cloud DB');
+          } catch (err: unknown) {
+            const code = (err as { code?: string })?.code || '';
+            if (code === 'auth/unauthorized-domain') {
+              showToast(`Add ${window.location.hostname} to Firebase Console → Auth → Authorized Domains`);
+            } else {
+              showToast('Could not connect Firebase Cloud DB');
+            }
             return false;
           }
         }}
