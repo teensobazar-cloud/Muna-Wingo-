@@ -1658,7 +1658,7 @@ export function createApiApp() {
     });
   });
 
-  // Sync Session cleanly across page reloads, Google Sign-In & cold containers (NEVER logs out active users on refresh, ONLY blocks/deletes explicit tombstones!)
+  // Sync Session cleanly across page reloads & cold containers (NEVER logs out active users on refresh, ONLY blocks/deletes explicit tombstones!)
   app.post('/api/auth/sync-session', async (req: Request, res: Response) => {
     const {
       user,
@@ -1668,20 +1668,15 @@ export function createApiApp() {
       localBalance,
       localTransactions,
       localBets,
-      isGoogleLogin,
-      isExplicitGoogleAuth,
-      isNewGoogleUser,
-      isAdminEmail,
     } = req.body || {};
     if (!user || !user.id || !user.phone) {
       return res.status(400).json({ error: 'Invalid session payload' });
     }
     const cleanPhone = normalizePhone(user.phone);
-    const cleanEmail = user.email ? String(user.email).trim().toLowerCase() : '';
     const isBlocked = Boolean(cleanPhone && isPhoneBlocked(cleanPhone));
     const isDeletedById = Boolean(db.deletedUserIds?.includes(String(user.id)));
 
-    if ((isBlocked || isDeletedById) && !isAdminEmail) {
+    if (isBlocked || isDeletedById) {
       return res.status(410).json({
         error: isBlocked ? 'PHONE_BLOCKED' : 'USER_DELETED',
         deleted: true,
@@ -1695,9 +1690,6 @@ export function createApiApp() {
 
     let existing =
       db.users[user.id] ||
-      (cleanEmail
-        ? Object.values(db.users).find((u) => u.email && u.email.toLowerCase() === cleanEmail)
-        : undefined) ||
       Object.values(db.users).find(
         (u) => canonicalPhone(u.phone) === canonicalPhone(cleanPhone) || normalizePhone(u.phone) === cleanPhone
       );
@@ -1706,8 +1698,7 @@ export function createApiApp() {
 
     if (!existing) {
       const canRestoreColdSession = Boolean(
-        isGoogleLogin ||
-          (walletData && walletData.id === String(user.id)) ||
+        (walletData && walletData.id === String(user.id)) ||
           (tokenData && tokenData.id === String(user.id)) ||
           (restoreIfColdStart &&
             cleanPhone.length >= 10 &&
@@ -1738,8 +1729,6 @@ export function createApiApp() {
         id: String(user.id),
         fullName: String(user.fullName || 'Player').trim(),
         phone: canonicalPhone(cleanPhone) || cleanPhone,
-        email: cleanEmail || undefined,
-        authProvider: isGoogleLogin ? 'google' : (user.authProvider as 'mobile' | 'google' | undefined),
         password: user.password ? hashPassword(String(user.password)) : hashPassword(`sess-${user.id}`),
         inviteCode: user.inviteCode ? String(user.inviteCode) : undefined,
         balance: restoredBalance,
@@ -1749,11 +1738,6 @@ export function createApiApp() {
         lastSeenAt: now,
       };
       db.users[existing.id] = existing;
-
-      let inviter: ServerUser | undefined;
-      if (isNewGoogleUser || isExplicitGoogleAuth) {
-        inviter = creditReferrerOnSignup(existing);
-      }
 
       if (Array.isArray(localTransactions)) {
         for (const lt of localTransactions) {
@@ -1773,58 +1757,17 @@ export function createApiApp() {
       }
 
       saveDatabase();
-      if (inviter) {
-        broadcastEvent('balance_updated', {
-          userId: inviter.id,
-          balance: inviter.balance,
-          reason: 'referral_signup_bonus',
-        });
-      }
-      broadcastEvent('state_changed', { reason: isExplicitGoogleAuth ? 'user_signup' : 'user_synced', userId: existing.id });
+      broadcastEvent('state_changed', { reason: 'user_synced', userId: existing.id });
     } else {
       existing.lastSeenAt = Date.now();
-      if (cleanEmail && !existing.email) {
-        existing.email = cleanEmail;
-      }
-      if (isGoogleLogin && !existing.authProvider) {
-        existing.authProvider = 'google';
-      }
       saveDatabase();
-      if (isExplicitGoogleAuth) {
-        broadcastEvent('state_changed', { reason: 'user_signin', userId: existing.id });
-      }
-    }
-
-    if (isExplicitGoogleAuth) {
-      const isNewEvent = Boolean(isCreatedNow || isNewGoogleUser);
-      await notifyAdminEvent({
-        eventType: isNewEvent ? 'signup' : 'login',
-        title: isNewEvent
-          ? `New Google Signup: ${existing.fullName} (${existing.email || existing.phone})`
-          : `Google Login: ${existing.fullName} (${existing.email || existing.phone})`,
-        summary: isNewEvent
-          ? `${existing.fullName} (${existing.email || existing.phone}) created a new account via Continue with Google.`
-          : `${existing.fullName} (${existing.email || existing.phone}) signed in via Continue with Google.`,
-        userId: existing.id,
-        userName: existing.fullName,
-        userPhone: existing.email || existing.phone,
-        amount: existing.balance,
-        details: [
-          ['User Name', existing.fullName],
-          ['Google Email', existing.email || 'Verified Google Account'],
-          ['Account Phone / ID', existing.phone],
-          ['User ID', existing.id],
-          ['Auth Method', 'Continue with Google'],
-          ['Balance', `Rs ${existing.balance.toLocaleString()}`],
-        ],
-      });
     }
 
     const commitHashes = getActiveCommitHashes(Date.now());
     const freshToken = signSessionToken(existing);
     return res.json({
       serverTime: Date.now(),
-      isNewUser: isCreatedNow || Boolean(isNewGoogleUser),
+      isNewUser: isCreatedNow,
       user: sanitizeUser(existing),
       sessionToken: freshToken,
       balanceToken: signWalletSnapshot(existing),
@@ -2349,6 +2292,27 @@ export function createApiApp() {
     db.winDeck = buildShuffledWinDeck(nextPct);
     saveDatabase();
     broadcastEvent('state_changed', { reason: 'win_ratio_updated', winRatePercent: nextPct });
+    return res.json({ ok: true, ...buildAdminSnapshot() });
+  });
+
+  // Refresh every game engine setting cleanly (30% win ratio, fresh deck, reset winStats, clear forced outcomes, resync commits)
+  app.post('/api/admin/refresh-settings', (req: Request, res: Response) => {
+    const pin = req.headers['x-admin-pin'] || req.body?.pin;
+    if (!verifyPin(pin)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    db.winRatePercent = DEFAULT_WIN_RATE_PERCENT;
+    db.winDeck = buildShuffledWinDeck(DEFAULT_WIN_RATE_PERCENT);
+    db.winStats = { totalRoundsWithBets: 0, playerWins: 0, houseWins: 0 };
+    db.forcedOutcomes = { 30: null, 60: null, 180: null, 300: null };
+    if (!db.roundCommits) db.roundCommits = {};
+    for (const mode of MODES) {
+      const periodNow = getPeriodForMode(mode, Date.now());
+      delete db.roundCommits[`${mode}:${periodNow}`];
+    }
+    getActiveCommitHashes(Date.now());
+    saveDatabase();
+    broadcastEvent('state_changed', { reason: 'settings_refreshed' });
     return res.json({ ok: true, ...buildAdminSnapshot() });
   });
 

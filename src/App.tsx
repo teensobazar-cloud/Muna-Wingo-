@@ -28,7 +28,7 @@ import {
   EmailConfigStatus,
   WinRatioStats
 } from './types/game';
-import { onAuthStateChanged, User } from 'firebase/auth';
+import { signOut } from 'firebase/auth';
 import {
   getInitialHistoryByMode,
   generateSingleDrawResult,
@@ -42,28 +42,6 @@ import {
 } from './utils/gameRules';
 import { soundManager } from './utils/audio';
 import { auth } from './firebase';
-import {
-  adminDeleteTransactionInFirestore,
-  adminDeleteUserInFirestore,
-  adminSyncDrawRecordToFirestore,
-  adminUpdateTransactionInFirestore,
-  adminUpsertUserToFirestore,
-  blockPhoneInFirestore,
-  createBetInFirestore,
-  createTransactionInFirestore,
-  ensureAdminDocument,
-  isVerifiedGoogleAdmin,
-  pushAdminSnapshotToFirestore,
-  settleBetInFirestore,
-  signInWithGoogleFirebase,
-  signOutFirebase,
-  subscribeAdminFirestoreState,
-  subscribeBlockedPhonesFromFirestore,
-  subscribePlayerFirestoreState,
-  syncGameModeOverrideToFirestore,
-  syncPlayerBalanceToFirestore,
-  unblockPhoneInFirestore,
-} from './services/firebaseSync';
 
 export default function App() {
   // 1. Theme, Language & Audio State
@@ -318,15 +296,6 @@ export default function App() {
     })()
   );
   const serverAdminUsersRef = useRef<RegisteredUser[]>([]);
-  const firestoreAdminUsersRef = useRef<RegisteredUser[]>([]);
-  const prevFirestoreIdsRef = useRef<Set<string>>(new Set());
-
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [firebaseAuthReady, setFirebaseAuthReady] = useState<boolean>(false);
-  const firebaseUserRef = useRef<User | null>(null);
-  useEffect(() => {
-    firebaseUserRef.current = firebaseUser;
-  }, [firebaseUser]);
 
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
@@ -431,7 +400,7 @@ export default function App() {
       (idsToRemove.has(active.id) ||
         (phonesToRemove && phonesToRemove.has(normalizePhoneKey(active.phone))))
     ) {
-      void signOutFirebase();
+      void signOut(auth).catch(() => {});
       try {
         localStorage.removeItem('muna_session_token');
         localStorage.removeItem('muna_balance_token');
@@ -450,15 +419,9 @@ export default function App() {
 
   const recomputeMergedAdminUsers = (): RegisteredUser[] => {
     const merged = new Map<string, RegisteredUser>();
-    for (const fu of firestoreAdminUsersRef.current) {
-      if (!isUserDeletedLocally(fu)) {
-        merged.set(fu.id, fu);
-      }
-    }
     for (const su of serverAdminUsersRef.current) {
       if (!isUserDeletedLocally(su)) {
-        const prev = merged.get(su.id);
-        merged.set(su.id, prev ? { ...prev, ...su } : su);
+        merged.set(su.id, su);
       }
     }
     const sorted = Array.from(merged.values()).sort(
@@ -519,9 +482,6 @@ export default function App() {
     if (tombstonesChanged) {
       persistDeletedTombstones();
       purgeActiveSession(deletedUserIdsRef.current, deletedPhonesRef.current);
-      firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter(
-        (u) => !isUserDeletedLocally(u)
-      );
     }
     if (Array.isArray(data.users)) {
       serverAdminUsersRef.current = data.users.filter((u) => !isUserDeletedLocally(u));
@@ -656,10 +616,6 @@ export default function App() {
             localBalance: balanceRef.current,
             localTransactions: transactionsRef.current,
             localBets: userBetsRef.current,
-            isGoogleLogin: Boolean(
-              firebaseUserRef.current || userObj.authProvider === 'google' || userObj.email
-            ),
-            isAdminEmail: isVerifiedGoogleAdmin(firebaseUserRef.current),
           }),
         });
 
@@ -1029,18 +985,6 @@ export default function App() {
             hasBet: true,
           });
           setIsWinModalOpen(true);
-
-          const fbUser = firebaseUserRef.current;
-          if (fbUser?.emailVerified && fbUser.uid === activeUser.id) {
-            void syncPlayerBalanceToFirestore(fbUser.uid, settled.newBalance).catch(() => {});
-            for (const sb of settled.bets) {
-              void settleBetInFirestore(sb.id, sb.status === 'won' ? 'won' : 'lost', sb.winAmount || 0, sb.profit || 0).catch(() => {});
-            }
-          }
-        }
-
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && data.result && data.mode) {
-          void adminSyncDrawRecordToFirestore(data.mode, data.result).catch(() => {});
         }
 
         if (isAdminAuthRef.current) {
@@ -1089,155 +1033,10 @@ export default function App() {
     return () => clearInterval(id);
   }, [isAdminOpen, isAdminAuthenticated]);
 
-  // Track Firebase Auth readiness & auto-unlock admin for verified owner email
+  // Clear any legacy client-side Firebase Google Auth session from browser cache
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (fbUser) => {
-      firebaseUserRef.current = fbUser;
-      setFirebaseUser(fbUser);
-      setFirebaseAuthReady(true);
-      if (isVerifiedGoogleAdmin(fbUser)) {
-        void ensureAdminDocument(fbUser!).catch(() => {});
-        isAdminAuthRef.current = true;
-        setIsAdminAuthenticated(true);
-        localStorage.setItem('muna_admin_logged_in', 'true');
-      }
-    });
-    return () => unsub();
+    void signOut(auth).catch(() => {});
   }, []);
-
-  // Attach real-time Firestore listener for signed-in Google player
-  useEffect(() => {
-    if (!firebaseAuthReady || !firebaseUser?.emailVerified) return;
-    if (!currentUser?.id || currentUser.id !== firebaseUser.uid) return;
-
-    const unsub = subscribePlayerFirestoreState(
-      firebaseUser.uid,
-      {
-        onUserUpdate: ({ balance: cloudBalance, referralEarnings: cloudRef, updatedAt: cloudUpdatedAt }) => {
-          if (betInFlightRef.current === 0) {
-            if (
-              typeof cloudBalance === 'number' &&
-              cloudBalance !== balanceRef.current &&
-              (!cloudUpdatedAt || cloudUpdatedAt >= lastServerBalanceUpdatedAtRef.current)
-            ) {
-              balanceRef.current = cloudBalance;
-              setBalance(cloudBalance);
-            }
-            if (typeof cloudRef === 'number') {
-              setReferralEarnings(cloudRef);
-            }
-          }
-        },
-        onTransactionsUpdate: (cloudTxs) => {
-          if (cloudTxs.length > 0) {
-            setTransactions((prev) => {
-              const merged = new Map<string, PaymentTransaction>();
-              for (const t of prev) merged.set(t.id, t);
-              for (const ct of cloudTxs) merged.set(ct.id, ct);
-              return Array.from(merged.values()).sort((a, b) => b.timestamp - a.timestamp);
-            });
-          }
-        },
-        onUserDeleted: () => {
-          const uid = firebaseUser.uid;
-          deletedUserIdsRef.current.add(uid);
-          const cp = normalizePhoneKey(currentUserRef.current?.phone);
-          if (cp) deletedPhonesRef.current.add(cp);
-          persistDeletedTombstones();
-          purgeActiveSession(new Set([uid]), cp ? new Set([cp]) : undefined);
-        },
-      },
-      (err) => {
-        console.error('Player Firestore sync error:', err);
-      }
-    );
-
-    return () => unsub();
-  }, [firebaseAuthReady, firebaseUser, currentUser?.id]);
-
-  // Attach real-time Firestore listener for verified Admin Cloud DB view
-  useEffect(() => {
-    if (!firebaseAuthReady || !isVerifiedGoogleAdmin(firebaseUser) || !isAdminAuthenticated) {
-      return;
-    }
-
-    const unsub = subscribeAdminFirestoreState(
-      {
-        onUsersUpdate: (cloudUsers) => {
-          const cloudIds = new Set<string>();
-          const activeCloudUsers: RegisteredUser[] = [];
-          for (const cu of cloudUsers) {
-            const isActiveSignedIn =
-              cu.id === firebaseUserRef.current?.uid ||
-              cu.id === currentUserRef.current?.id;
-            if (!isActiveSignedIn && isUserDeletedLocally(cu)) {
-              void adminDeleteUserInFirestore(cu.id).catch(() => {});
-              continue;
-            }
-            cloudIds.add(cu.id);
-            activeCloudUsers.push(cu);
-          }
-
-          // Any user that previously existed in Firestore and disappeared was deleted in Cloud DB
-          if (prevFirestoreIdsRef.current.size > 0) {
-            const removedIds = new Set<string>();
-            for (const prevId of prevFirestoreIdsRef.current) {
-              if (!cloudIds.has(prevId)) {
-                removedIds.add(prevId);
-                deletedUserIdsRef.current.add(prevId);
-              }
-            }
-            if (removedIds.size > 0) {
-              persistDeletedTombstones();
-              serverAdminUsersRef.current = serverAdminUsersRef.current.filter(
-                (u) => !removedIds.has(u.id)
-              );
-              purgeActiveSession(removedIds);
-            }
-          }
-
-          prevFirestoreIdsRef.current = cloudIds;
-          firestoreAdminUsersRef.current = activeCloudUsers;
-          recomputeMergedAdminUsers();
-        },
-        onTransactionsUpdate: (cloudTxs) => {
-          if (cloudTxs.length > 0) {
-            setAdminTransactions((prev) => {
-              const merged = new Map<string, PaymentTransaction>();
-              for (const t of prev) merged.set(t.id, t);
-              for (const ct of cloudTxs) merged.set(ct.id, ct);
-              return Array.from(merged.values()).sort((a, b) => b.timestamp - a.timestamp);
-            });
-          }
-        },
-        onBetsUpdate: (cloudBets) => {
-          if (cloudBets.length > 0) {
-            setAdminBets((prev) => {
-              const merged = new Map<string, UserBet>();
-              for (const b of prev) merged.set(b.id, b);
-              for (const cb of cloudBets) merged.set(cb.id, cb);
-              return Array.from(merged.values()).sort((a, b) => b.timestamp - a.timestamp);
-            });
-          }
-        },
-      },
-      (err) => {
-        console.error('Admin Firestore sync error:', err);
-      }
-    );
-
-    const unsubBlocked = subscribeBlockedPhonesFromFirestore((cloudBlocked) => {
-      setBlockedPhones((prev) => {
-        const merged = new Set([...prev, ...cloudBlocked]);
-        return Array.from(merged);
-      });
-    });
-
-    return () => {
-      unsub();
-      unsubBlocked();
-    };
-  }, [firebaseAuthReady, firebaseUser, isAdminAuthenticated]);
 
   const [latestRoundSummary, setLatestRoundSummary] = useState<{
     result: DrawResult | null;
@@ -1455,19 +1254,6 @@ export default function App() {
         setBalance(serverBalance);
       }
 
-      const fbUser = firebaseUserRef.current;
-      if (fbUser?.emailVerified && fbUser.uid === currentUserRef.current?.id) {
-        if (typeof serverBalance === 'number') {
-          void syncPlayerBalanceToFirestore(fbUser.uid, serverBalance).catch(() => {});
-        }
-        for (const sb of settledRoundBets) {
-          void settleBetInFirestore(sb.id, sb.status === 'won' ? 'won' : 'lost', sb.winAmount || 0, sb.profit || 0).catch(() => {});
-        }
-      }
-      if (isVerifiedGoogleAdmin(fbUser) && completedResult) {
-        void adminSyncDrawRecordToFirestore(mode, completedResult).catch(() => {});
-      }
-
       setLatestRoundSummary({
         result: completedResult,
         roundBets: settledRoundBets,
@@ -1673,14 +1459,6 @@ export default function App() {
             );
             userBetsRef.current = replaced;
             setUserBets(replaced);
-
-            const fbUser = firebaseUserRef.current;
-            if (fbUser?.emailVerified && fbUser.uid === currentUser.id) {
-              void createBetInFirestore(data.bet, fbUser.uid).catch(() => {});
-              if (typeof data.balance === 'number') {
-                void syncPlayerBalanceToFirestore(fbUser.uid, data.balance).catch(() => {});
-              }
-            }
           }
         } else if (res.status === 400) {
           const errData = await res.json().catch(() => ({}));
@@ -1774,13 +1552,6 @@ export default function App() {
             setTransactions((prev) =>
               prev.some((t) => t.id === data.tx.id) ? prev : [data.tx, ...prev]
             );
-            const fbUser = firebaseUserRef.current;
-            if (fbUser?.emailVerified && (fbUser.uid === currentUser.id || isVerifiedGoogleAdmin(fbUser))) {
-              void createTransactionInFirestore(data.tx, data.tx.userId || currentUser.id).catch(() => {});
-              if (typeof data.balance === 'number' && fbUser.uid === currentUser.id) {
-                void syncPlayerBalanceToFirestore(fbUser.uid, data.balance).catch(() => {});
-              }
-            }
           }
           if (isAdminAuthRef.current) {
             fetchAdminState();
@@ -1819,13 +1590,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, { status: 'completed' }).catch(() => {});
-          if (data.tx?.userId && Array.isArray(data.users)) {
-            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
-            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
-          }
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'ڈپازٹ منظور ہو گیا اور بیلنس شامل ہو گیا!' : 'Deposit approved & credited!');
         return;
@@ -1856,9 +1620,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, { status: 'rejected' }).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'ڈپازٹ درخواست مسترد کر دی گئی' : 'Deposit request rejected');
         return;
@@ -1939,13 +1700,6 @@ export default function App() {
             setTransactions((prev) =>
               prev.some((t) => t.id === data.tx.id) ? prev : [data.tx, ...prev]
             );
-            const fbUser = firebaseUserRef.current;
-            if (fbUser?.emailVerified && fbUser.uid === currentUser.id) {
-              void createTransactionInFirestore(data.tx, fbUser.uid).catch(() => {});
-              if (typeof data.balance === 'number') {
-                void syncPlayerBalanceToFirestore(fbUser.uid, data.balance).catch(() => {});
-              }
-            }
           }
           if (isAdminAuthRef.current) {
             fetchAdminState();
@@ -1987,9 +1741,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, { status: 'completed' }).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(
           language === 'ur'
@@ -2017,13 +1768,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, { status: 'rejected' }).catch(() => {});
-          if (data.tx?.userId && Array.isArray(data.users)) {
-            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
-            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
-          }
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(
           language === 'ur'
@@ -2053,9 +1797,6 @@ export default function App() {
       });
       if (res.ok) {
         applyAdminSnapshot(await res.json());
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminDeleteTransactionInFirestore(txId).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
       }
     } catch {
@@ -2076,13 +1817,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, updated).catch(() => {});
-          if (data.tx?.userId && Array.isArray(data.users)) {
-            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
-            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
-          }
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'ڈپازٹ ریکارڈ کامیابی سے اپ ڈیٹ ہو گیا!' : 'Deposit record updated!');
         return;
@@ -2126,12 +1860,6 @@ export default function App() {
       if (res.ok) {
         const resData = await res.json();
         applyAdminSnapshot(resData);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && resData.tx) {
-          void createTransactionInFirestore(
-            resData.tx,
-            resData.tx.userId || firebaseUserRef.current!.uid
-          ).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(
           language === 'ur'
@@ -2154,9 +1882,6 @@ export default function App() {
       });
       if (res.ok) {
         applyAdminSnapshot(await res.json());
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminDeleteTransactionInFirestore(txId).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
       }
     } catch {
@@ -2177,13 +1902,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-          void adminUpdateTransactionInFirestore(txId, updated).catch(() => {});
-          if (data.tx?.userId && Array.isArray(data.users)) {
-            const matchedUser = data.users.find((u: RegisteredUser) => u.id === data.tx.userId);
-            if (matchedUser) void adminUpsertUserToFirestore(matchedUser).catch(() => {});
-          }
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(language === 'ur' ? 'وڈرا ریکارڈ کامیابی سے اپ ڈیٹ ہو گیا!' : 'Withdrawal record updated!');
         return;
@@ -2224,12 +1942,6 @@ export default function App() {
       if (res.ok) {
         const resData = await res.json();
         applyAdminSnapshot(resData);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && resData.tx) {
-          void createTransactionInFirestore(
-            resData.tx,
-            resData.tx.userId || firebaseUserRef.current!.uid
-          ).catch(() => {});
-        }
         syncPlayerState(currentUserRef.current?.id);
         showToast(
           language === 'ur'
@@ -2256,9 +1968,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && data.user) {
-          void adminUpsertUserToFirestore(data.user).catch(() => {});
-        }
         if (currentUserRef.current?.id === userId && data.user) {
           lastServerBalanceUpdatedAtRef.current =
             typeof data.user.balanceUpdatedAt === 'number'
@@ -2276,7 +1985,6 @@ export default function App() {
   const handleDeleteUserOnServer = async (userId: string) => {
     const matched =
       serverAdminUsersRef.current.find((u) => u.id === userId) ||
-      firestoreAdminUsersRef.current.find((u) => u.id === userId) ||
       adminUsers.find((u) => u.id === userId);
     const phoneKey = matched?.phone ? normalizePhoneKey(matched.phone) : '';
 
@@ -2284,9 +1992,7 @@ export default function App() {
     if (phoneKey) deletedPhonesRef.current.add(phoneKey);
     persistDeletedTombstones();
 
-    prevFirestoreIdsRef.current.delete(userId);
     serverAdminUsersRef.current = serverAdminUsersRef.current.filter((u) => u.id !== userId);
-    firestoreAdminUsersRef.current = firestoreAdminUsersRef.current.filter((u) => u.id !== userId);
     recomputeMergedAdminUsers();
     purgeActiveSession(new Set([userId]), phoneKey ? new Set([phoneKey]) : undefined);
 
@@ -2298,19 +2004,9 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         applyAdminSnapshot(data);
-        if (isVerifiedGoogleAdmin(firebaseUserRef.current) && data.blockedPhone) {
-          void blockPhoneInFirestore(data.blockedPhone).catch(() => {});
-        }
       }
     } catch {
       // ignore
-    }
-
-    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-      await adminDeleteUserInFirestore(userId).catch(() => {});
-      if (phoneKey) {
-        await blockPhoneInFirestore(phoneKey).catch(() => {});
-      }
     }
   };
 
@@ -2332,9 +2028,6 @@ export default function App() {
       }
     } catch {
       // ignore
-    }
-    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-      await unblockPhoneInFirestore(phone).catch(() => {});
     }
   };
 
@@ -2382,15 +2075,13 @@ export default function App() {
 
   // Admin CRUD: Delete All User Data
   const handleClearAllUserData = async () => {
-    for (const u of [...serverAdminUsersRef.current, ...firestoreAdminUsersRef.current, ...adminUsers]) {
+    for (const u of [...serverAdminUsersRef.current, ...adminUsers]) {
       deletedUserIdsRef.current.add(u.id);
       const cp = normalizePhoneKey(u.phone);
       if (cp) deletedPhonesRef.current.add(cp);
     }
     persistDeletedTombstones();
     serverAdminUsersRef.current = [];
-    firestoreAdminUsersRef.current = [];
-    prevFirestoreIdsRef.current = new Set();
     setAdminUsers([]);
     setAdminTransactions([]);
     setAdminBets([]);
@@ -2404,13 +2095,6 @@ export default function App() {
       if (res.ok) applyAdminSnapshot(await res.json());
     } catch {
       // ignore
-    }
-    if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-      await pushAdminSnapshotToFirestore(
-        [],
-        [],
-        Array.from(deletedUserIdsRef.current)
-      ).catch(() => {});
     }
     setBalance(0);
     setUserBets([]);
@@ -2581,11 +2265,6 @@ export default function App() {
             persistDeletedTombstones();
             currentUserRef.current = user;
             setCurrentUser(user);
-            if (serverPayload?.isGoogleAdmin) {
-              isAdminAuthRef.current = true;
-              setIsAdminAuthenticated(true);
-              localStorage.setItem('muna_admin_logged_in', 'true');
-            }
             if (isNewSignup) {
               showToast(
                 language === 'ur'
@@ -2648,7 +2327,7 @@ export default function App() {
               setMusicEnabled(next);
             }}
             onLogout={() => {
-              void signOutFirebase();
+              void signOut(auth).catch(() => {});
               try {
                 localStorage.removeItem('muna_session_token');
                 localStorage.removeItem('muna_balance_token');
@@ -2839,9 +2518,6 @@ export default function App() {
               const data = await res.json();
               if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
               applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
-              if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-                void syncGameModeOverrideToFirestore(mode, spec).catch(() => {});
-              }
               if (spec) {
                 const desc =
                   spec.kind === 'number'
@@ -2897,9 +2573,6 @@ export default function App() {
               const data = await res.json();
               if (typeof data.serverTime === 'number') setServerTimeOffset(data.serverTime);
               applyServerForcedMaps(data.forcedOutcomes, data.forcedNumbers);
-              if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-                void syncGameModeOverrideToFirestore(mode, spec).catch(() => {});
-              }
               if (num !== null) {
                 showToast(
                   language === 'ur'
@@ -2947,18 +2620,7 @@ export default function App() {
           return false;
         }}
         onRefreshAdmin={async () => {
-          const fresh = await fetchAdminState();
-          if (isVerifiedGoogleAdmin(firebaseUserRef.current)) {
-            const usersToPush = (fresh?.users || serverAdminUsersRef.current).filter(
-              (u: RegisteredUser) => !isUserDeletedLocally(u)
-            );
-            const txsToPush = fresh?.transactions || adminTransactions;
-            await pushAdminSnapshotToFirestore(
-              usersToPush,
-              txsToPush,
-              Array.from(deletedUserIdsRef.current)
-            ).catch(() => {});
-          }
+          await fetchAdminState();
         }}
         onTestEmailNotification={async () => {
           try {
@@ -2996,6 +2658,30 @@ export default function App() {
           } catch {
             // ignore
           }
+        }}
+        onRefreshGameSettings={async () => {
+          try {
+            const res = await fetch('/api/admin/refresh-settings', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-pin': adminPinRef.current || '786',
+              },
+              body: JSON.stringify({ pin: adminPinRef.current || '786' }),
+            });
+            if (res.ok) {
+              applyAdminSnapshot(await res.json());
+              showToast(
+                language === 'ur'
+                  ? 'تمام گیم سیٹنگز ریفریش ہو گئیں!'
+                  : 'All game settings refreshed cleanly!'
+              );
+              return true;
+            }
+          } catch {
+            // ignore
+          }
+          return false;
         }}
         onUpdateUserBalance={handleUpdateUserBalanceOnServer}
         onDeleteUser={handleDeleteUserOnServer}
@@ -3057,37 +2743,6 @@ export default function App() {
         onAuthenticate={(status) => {
           isAdminAuthRef.current = status;
           setIsAdminAuthenticated(status);
-        }}
-        firebaseAdminConnected={isVerifiedGoogleAdmin(firebaseUser)}
-        firebaseAdminEmail={firebaseUser?.email ?? null}
-        onConnectGoogleCloud={async () => {
-          try {
-            const { firebaseUser: fbUser, isAdminEmail } = await signInWithGoogleFirebase();
-            if (!isAdminEmail) {
-              showToast('Please sign in using teensobazar@gmail.com for Cloud Admin access');
-              return false;
-            }
-            await ensureAdminDocument(fbUser);
-            const fresh = await fetchAdminState();
-            const usersToPush = (fresh?.users || serverAdminUsersRef.current).filter(
-              (u: RegisteredUser) => !isUserDeletedLocally(u)
-            );
-            await pushAdminSnapshotToFirestore(
-              usersToPush,
-              fresh?.transactions || adminTransactions,
-              Array.from(deletedUserIdsRef.current)
-            );
-            showToast('Firebase Cloud DB connected live!');
-            return true;
-          } catch (err: unknown) {
-            const code = (err as { code?: string })?.code || '';
-            if (code === 'auth/unauthorized-domain') {
-              showToast(`Add ${window.location.hostname} to Firebase Console → Auth → Authorized Domains`);
-            } else {
-              showToast('Could not connect Firebase Cloud DB');
-            }
-            return false;
-          }
         }}
       />
 

@@ -83,6 +83,7 @@ interface AdminPanelProps {
   winStats?: WinRatioStats;
   lastSyncedAt?: number;
   onRefreshAdmin?: () => Promise<void> | void;
+  onRefreshGameSettings?: () => Promise<boolean> | void;
   onUpdateWinRatio?: (pct: number) => Promise<boolean> | void;
   onTestEmailNotification?: () => Promise<boolean> | void;
   onClearNotifications?: () => Promise<void> | void;
@@ -142,9 +143,6 @@ interface AdminPanelProps {
   language: 'ur' | 'en';
   isAuthenticated: boolean;
   onAuthenticate: (status: boolean) => void;
-  firebaseAdminConnected?: boolean;
-  firebaseAdminEmail?: string | null;
-  onConnectGoogleCloud?: () => Promise<boolean> | void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -165,6 +163,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   winStats,
   lastSyncedAt,
   onRefreshAdmin,
+  onRefreshGameSettings,
   onUpdateWinRatio,
   onTestEmailNotification,
   onClearNotifications,
@@ -194,9 +193,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   language,
   isAuthenticated,
   onAuthenticate,
-  firebaseAdminConnected,
-  firebaseAdminEmail,
-  onConnectGoogleCloud
 }) => {
   // Master PIN (Default: 786)
   const [adminPin, setAdminPin] = useState<string>(() => {
@@ -584,31 +580,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           <div className="flex items-center gap-1.5 shrink-0">
             {isAuthenticated && (
               <>
-                {firebaseAdminConnected ? (
-                  <span
-                    className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-amber-500/15 border border-amber-400/35 text-amber-300 text-[10px] font-bold"
-                    title={firebaseAdminEmail ? `Firebase Connected: ${firebaseAdminEmail}` : 'Firebase Connected'}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Cloud DB</span>
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      soundManager.playClick();
-                      const ok = await onConnectGoogleCloud?.();
-                      if (ok) {
-                        showNotice('Firebase Cloud Database connected!');
-                      }
-                    }}
-                    className="px-2 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/35 border border-amber-400/40 text-amber-300 text-[10px] font-bold cursor-pointer transition-all"
-                    title="Sign in with teensobazar@gmail.com to enable live Firebase Cloud sync"
-                  >
-                    Connect Cloud DB
-                  </button>
-                )}
-
                 <button
                   type="button"
                   onClick={async () => {
@@ -902,31 +873,53 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       )}
                     </div>
                     {onUpdateWinRatio && (
-                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                        {[20, 30, 40, 50].map((pct) => (
+                      <div className="flex items-center justify-between gap-1.5 flex-wrap pt-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {[20, 30, 40, 50].map((pct) => (
+                            <button
+                              key={pct}
+                              type="button"
+                              onClick={async () => {
+                                soundManager.playClick();
+                                const ok = await onUpdateWinRatio(pct);
+                                if (ok) {
+                                  showNotice(
+                                    language === 'ur'
+                                      ? `وننگ ریشو ${pct}% سیٹ ہو گیا (100 میں سے ${pct} ون)`
+                                      : `Win Ratio updated to ${pct}% (${pct} wins per 100)`
+                                  );
+                                }
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                                winRatePercent === pct
+                                  ? 'bg-emerald-500 text-slate-950 shadow'
+                                  : 'bg-slate-900 text-slate-300 hover:bg-slate-700 border border-slate-700'
+                              }`}
+                            >
+                              {pct}% Win {pct === 30 ? '★' : ''}
+                            </button>
+                          ))}
+                        </div>
+                        {onRefreshGameSettings && (
                           <button
-                            key={pct}
                             type="button"
                             onClick={async () => {
                               soundManager.playClick();
-                              const ok = await onUpdateWinRatio(pct);
+                              const ok = await onRefreshGameSettings();
                               if (ok) {
                                 showNotice(
                                   language === 'ur'
-                                    ? `وننگ ریشو ${pct}% سیٹ ہو گیا (100 میں سے ${pct} ون)`
-                                    : `Win Ratio updated to ${pct}% (${pct} wins per 100)`
+                                    ? 'تمام گیم سیٹنگز 30% وننگ اور آٹو موڈ پر ریفریش ہو گئیں!'
+                                    : 'All game settings refreshed (30% Win Ratio, Auto mode & live clock synced)'
                                 );
                               }
                             }}
-                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
-                              winRatePercent === pct
-                                ? 'bg-emerald-500 text-slate-950 shadow'
-                                : 'bg-slate-900 text-slate-300 hover:bg-slate-700 border border-slate-700'
-                            }`}
+                            className="px-2.5 py-1 rounded-lg text-[10px] font-black bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 flex items-center gap-1 cursor-pointer"
                           >
-                            {pct}% Win {pct === 30 ? '★' : ''}
+                            <RefreshCw className="w-3 h-3" />
+                            <span>Refresh All Settings</span>
                           </button>
-                        ))}
+                        )}
                       </div>
                     )}
                   </div>
